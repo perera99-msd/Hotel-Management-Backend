@@ -1,30 +1,34 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 
 export interface ITripPackage extends Document {
-  title: string;
+  name: string;
   description: string;
   price: number;
-  durationDays: number;
+  duration: string; // Stores "1 day", "2 days" etc.
+  maxParticipants: number;
+  vehicle: string;
+  location: string;
+  status: string; // 'Active' | 'Inactive'
   itinerary: string[];
-  isPublic: boolean;
 }
 
 const TripPackageSchema = new Schema<ITripPackage>(
   {
-    title: { type: String, required: true },
+    name: { type: String, required: true },
     description: { type: String, required: true },
     price: { type: Number, required: true },
-    durationDays: { type: Number, required: true },
+    duration: { type: String, required: true },
+    maxParticipants: { type: Number, required: true },
+    vehicle: { type: String, required: true },
+    location: { type: String, required: true },
+    status: { 
+        type: String, 
+        enum: ['Active', 'Inactive'], 
+        default: 'Active' 
+    },
     itinerary: { type: [String], default: [] },
-    isPublic: { type: Boolean, default: true, index: true },
   },
   { timestamps: true }
 );
 
 export const TripPackage: Model<ITripPackage> = mongoose.model<ITripPackage>('TripPackage', TripPackageSchema);
-
-
-
-
-
-

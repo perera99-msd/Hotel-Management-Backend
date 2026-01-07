@@ -1,10 +1,16 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
-export type TripRequestStatus = 'Requested' | 'Reviewed' | 'Approved' | 'Rejected';
+export type TripRequestStatus = 'Requested' | 'Pending' | 'Confirmed' | 'Completed' | 'Cancelled' | 'Reviewed' | 'Approved' | 'Rejected';
 
 export interface ITripRequest extends Document {
   requestedBy: Types.ObjectId;
-  details: string;
+  packageId?: Types.ObjectId; // Link to specific package if applicable
+  packageName?: string;       // Snapshot of name in case package is deleted
+  location?: string;
+  tripDate?: Date;
+  participants: number;
+  totalPrice?: number;
+  details: string;            // Notes or Custom Details
   status: TripRequestStatus;
   responseNotes?: string;
 }
@@ -12,17 +18,22 @@ export interface ITripRequest extends Document {
 const TripRequestSchema = new Schema<ITripRequest>(
   {
     requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    details: { type: String, required: true },
-    status: { type: String, enum: ['Requested', 'Reviewed', 'Approved', 'Rejected'], default: 'Requested', index: true },
+    packageId: { type: Schema.Types.ObjectId, ref: 'TripPackage' },
+    packageName: { type: String },
+    location: { type: String },
+    tripDate: { type: Date },
+    participants: { type: Number, default: 1 },
+    totalPrice: { type: Number },
+    details: { type: String, default: '' },
+    status: { 
+      type: String, 
+      enum: ['Requested', 'Pending', 'Confirmed', 'Completed', 'Cancelled', 'Reviewed', 'Approved', 'Rejected'], 
+      default: 'Pending', 
+      index: true 
+    },
     responseNotes: { type: String },
   },
   { timestamps: true }
 );
 
 export const TripRequest: Model<ITripRequest> = mongoose.model<ITripRequest>('TripRequest', TripRequestSchema);
-
-
-
-
-
-
