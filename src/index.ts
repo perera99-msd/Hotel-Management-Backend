@@ -13,7 +13,11 @@ const app = express();
 
 app.use(helmet());
 app.use(cors());
-app.use(express.json());
+
+// CRITICAL FIX: Increased limit to 10mb to allow image uploads (base64)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
 app.use(morgan('dev'));
 
 registerRoutes(app);
@@ -35,5 +39,3 @@ connectMongo()
   });
 
 export default app;
-
-

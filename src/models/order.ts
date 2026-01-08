@@ -1,3 +1,4 @@
+// src/models/order.ts
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
 export type OrderStatus = 'Preparing' | 'Ready' | 'Served' | 'Cancelled';
@@ -10,12 +11,15 @@ export interface IOrderItem {
 }
 
 export interface IOrder extends Document {
-  guestId: Types.ObjectId;
-  roomId?: Types.ObjectId;
+  guestId?: Types.ObjectId; // Optional for manual orders
+  guestName?: string;       // For manual orders
+  roomNumber?: string;
+  tableNumber?: string;
+  specialNotes?: string;
   items: IOrderItem[];
   totalAmount: number;
   status: OrderStatus;
-  placedBy: Types.ObjectId; // user id (receptionist or customer)
+  placedBy: Types.ObjectId;
 }
 
 const OrderItemSchema = new Schema<IOrderItem>({
@@ -27,8 +31,11 @@ const OrderItemSchema = new Schema<IOrderItem>({
 
 const OrderSchema = new Schema<IOrder>(
   {
-    guestId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    roomId: { type: Schema.Types.ObjectId, ref: 'Room' },
+    guestId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    guestName: { type: String },
+    roomNumber: { type: String },
+    tableNumber: { type: String },
+    specialNotes: { type: String },
     items: { type: [OrderItemSchema], required: true },
     totalAmount: { type: Number, required: true },
     status: { type: String, enum: ['Preparing', 'Ready', 'Served', 'Cancelled'], default: 'Preparing', index: true },
@@ -38,9 +45,3 @@ const OrderSchema = new Schema<IOrder>(
 );
 
 export const Order: Model<IOrder> = mongoose.model<IOrder>('Order', OrderSchema);
-
-
-
-
-
-
