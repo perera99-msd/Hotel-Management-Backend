@@ -1,62 +1,76 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
-import { Invoice, IInvoiceLineItem } from '../models/invoice.js';
+import { Invoice } from '../models/invoice.js';
 import { Booking } from '../models/booking.js';
-import { Room } from '../models/room.js';
-import { Order } from '../models/order.js';
 
 export const invoicesRouter = Router();
 invoicesRouter.use(authenticate());
 
-// GET /invoices/:bookingId — returns latest invoice or computed preview
-invoicesRouter.get('/:bookingId', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
+// GET all invoices
+invoicesRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req: Request, res: Response) => {
   try {
-    const { bookingId } = req.params;
-    const existing = await Invoice.findOne({ bookingId }).sort({ createdAt: -1 }).lean();
-    if (existing) return res.json(existing);
-
-    const preview = await buildInvoicePreview(bookingId);
-    res.json(preview);
+    const invoices = await Invoice.find({})
+      .populate('bookingId')
+      .populate({
+        path: 'bookingId',
+        populate: { path: 'guestId', select: 'name email phone' }
+      })
+      .sort({ createdAt: -1 });
+    res.json(invoices);
   } catch (err) {
-    res.status(400).json({ error: 'Failed to fetch invoice' });
+    res.status(500).json({ error: 'Failed to fetch invoices' });
   }
 });
 
-// POST /invoices/:bookingId/generate — persists an invoice; optional extra items, serviceFeePct, discount
-invoicesRouter.post('/:bookingId/generate', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
+// CREATE Invoice
+invoicesRouter.post('/', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
-    const { bookingId } = req.params;
-    const extraItems = (req.body?.items || []) as IInvoiceLineItem[];
-    const serviceFeePct = Number(req.body?.serviceFeePct ?? 0);
-    const discount = Number(req.body?.discount ?? 0);
+    const { bookingId, items, status } = req.body;
 
-    const base = await buildInvoicePreview(bookingId);
-    const allItems: IInvoiceLineItem[] = [...base.lineItems, ...extraItems];
-    const subtotal = allItems.reduce((s, i) => s + i.amount * i.qty, 0);
-    const serviceFee = Math.round((subtotal * serviceFeePct) * 100) / 100;
-    const total = Math.max(0, subtotal + serviceFee - discount);
+    // Check Booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-    const saved = await Invoice.create({ bookingId, lineItems: allItems, subtotal, total });
-    res.status(201).json(saved);
+    // Calc totals
+    const lineItems = items || [];
+    const subtotal = lineItems.reduce((sum: number, item: any) => sum + (item.amount), 0);
+    const tax = subtotal * 0.10; 
+    const total = subtotal + tax;
+
+    const newInvoice = await Invoice.create({
+      bookingId,
+      guestId: booking.guestId, // Link to guest automatically
+      lineItems,
+      subtotal,
+      tax,
+      total,
+      status: status || 'pending',
+      paidAt: status === 'paid' ? new Date() : undefined
+    });
+
+    res.status(201).json(newInvoice);
   } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Failed to generate invoice' });
+    res.status(400).json({ error: err.message || 'Failed to create invoice' });
   }
 });
 
-async function buildInvoicePreview(bookingId: string) {
-  const booking = await Booking.findById(bookingId).lean();
-  if (!booking) throw new Error('Booking not found');
-  const room = await Room.findById(booking.roomId).lean();
-  const nights = Math.max(1, Math.ceil((new Date(booking.checkOut).getTime() - new Date(booking.checkIn).getTime()) / (24 * 60 * 60 * 1000)));
-  const roomLine: IInvoiceLineItem = { description: `Room ${room?.roomNumber ?? ''} (${nights} night${nights > 1 ? 's' : ''})`, qty: 1, amount: (room?.rate ?? 0) * nights };
+// UPDATE Invoice (Pay)
+invoicesRouter.put('/:id', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
+  try {
+    const { status } = req.body;
+    const updateData: any = { status };
+    
+    if (status === 'paid') updateData.paidAt = new Date();
 
-  const orders = await Order.find({ guestId: booking.guestId }).lean();
-  const ordersTotal = orders.reduce((sum, o) => sum + o.totalAmount, 0);
-  const diningLine: IInvoiceLineItem | undefined = ordersTotal > 0 ? { description: 'Dining & Room Service', qty: 1, amount: ordersTotal } : undefined;
+    const updated = await Invoice.findByIdAndUpdate(req.params.id, updateData, { new: true })
+        .populate({
+            path: 'bookingId',
+            populate: { path: 'guestId', select: 'name email' }
+        });
 
-  const lineItems = [roomLine, ...(diningLine ? [diningLine] : [])];
-  const subtotal = lineItems.reduce((s, i) => s + i.amount * i.qty, 0);
-  return { bookingId, lineItems, subtotal, total: subtotal };
-}
-
-
+    if (!updated) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(updated);
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to update invoice' });
+  }
+});

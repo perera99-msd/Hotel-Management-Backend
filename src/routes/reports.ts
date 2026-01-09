@@ -8,6 +8,8 @@ import { InventoryItem } from '../models/inventoryItem.js';
 export const reportsRouter = Router();
 reportsRouter.use(authenticate());
 
+// ... (keep occupancy and sales routes as they are) ...
+
 reportsRouter.get('/occupancy', requireRoles('admin', 'receptionist'), async (_req: Request, res: Response) => {
   try {
     const totalRooms = await Room.countDocuments();
@@ -40,7 +42,6 @@ reportsRouter.get('/sales', requireRoles('admin'), async (_req: Request, res: Re
 
 reportsRouter.get('/inventory-usage', requireRoles('admin', 'receptionist'), async (_req: Request, res: Response) => {
   try {
-    // Placeholder; detailed consumption tracking would require usage logs per order.
     res.json({ message: 'Inventory usage tracking not implemented in this version.' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to compute inventory usage' });
@@ -54,7 +55,11 @@ reportsRouter.get('/summary', requireRoles('admin', 'receptionist'), async (_req
     const availableRooms = await Room.countDocuments({ status: 'Available' });
     const occupiedRooms = await Room.countDocuments({ status: 'Occupied' });
     const needsCleaning = await Room.countDocuments({ needsCleaning: true });
-    const lowStockCount = await InventoryItem.countDocuments({ $expr: { $lte: ['$quantity', '$lowStockThreshold'] } });
+    
+    // FIX: Updated field names to match InventoryItem model
+    const lowStockCount = await InventoryItem.countDocuments({ 
+      $expr: { $lte: ['$currentStock', '$minStock'] } 
+    });
 
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -85,8 +90,7 @@ reportsRouter.get('/summary', requireRoles('admin', 'receptionist'), async (_req
       monthlyRevenue: monthlyRoomRevenue + monthlyFnb,
     });
   } catch (err) {
+    console.error("Summary error:", err);
     res.status(500).json({ error: 'Failed to build summary' });
   }
 });
-
-
