@@ -1,10 +1,9 @@
+/* */
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// You can either use the file path or environment variables
-// For production, environment variables are better
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -15,5 +14,8 @@ if (!admin.apps.length) {
     }),
   });
 }
+
+// ✅ CRITICAL FIX: Named export for Auth service
+export const auth = admin.auth();
 
 export default admin;

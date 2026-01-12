@@ -1,3 +1,4 @@
+/* */
 import { Express, Request, Response } from 'express';
 import { roomsRouter } from './rooms.js';
 import { bookingsRouter } from './bookings.js';
@@ -8,6 +9,9 @@ import { tripsRouter } from './trips.js';
 import { invoicesRouter } from './invoices.js';
 import { reportsRouter } from './reports.js';
 import { userRouter } from './user.js';
+import { settingsRouter } from './settings.js';
+import { dealsRouter } from './deals.js';
+import { ratesRouter } from './rates.js'; // ✅ Import Rates Router
 
 export function registerRoutes(app: Express): void {
   app.get('/health', (_req: Request, res: Response) => {
@@ -16,8 +20,6 @@ export function registerRoutes(app: Express): void {
 
   // API Routes
   app.use('/api/users', userRouter); 
-  
-  // ✅ FIX: Add '/api' prefix to all these routes to match Frontend calls
   app.use('/api/rooms', roomsRouter);
   app.use('/api/bookings', bookingsRouter);
   app.use('/api/menu', menuRouter);
@@ -26,4 +28,7 @@ export function registerRoutes(app: Express): void {
   app.use('/api/trips', tripsRouter);
   app.use('/api/invoices', invoicesRouter);
   app.use('/api/reports', reportsRouter);
+  app.use('/api/settings', settingsRouter);
+  app.use('/api/deals', dealsRouter);
+  app.use('/api/rates', ratesRouter); // ✅ Register Rates Route
 }

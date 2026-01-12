@@ -1,3 +1,4 @@
+/* */
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
@@ -20,8 +21,10 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use(morgan('dev'));
 
+// Register all API routes (including the new Deals route)
 registerRoutes(app);
 
+// Swagger Documentation
 const spec = buildSwaggerSpec();
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(spec));
 

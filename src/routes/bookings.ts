@@ -1,31 +1,25 @@
+/* */
 import { Router, Request, Response } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
 import { Room } from '../models/room.js';
+import { User } from '../models/user.js';
+import { auth } from '../lib/firebaseAdmin.js'; 
 
 export const bookingsRouter = Router();
 
-// Apply authentication to all routes
 bookingsRouter.use(authenticate());
 
-// ==========================================
-// GET /api/bookings
-// List all bookings (Admin sees all, Customer sees their own)
-// ==========================================
+// GET /api/bookings - List all bookings
 bookingsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    
-    // Check if user is staff (Admin or Receptionist)
-    const isStaff = user.roles.some((r: string) => ['admin', 'receptionist'].includes(r));
-    
-    // IF Staff -> Show ALL bookings ({})
-    // IF Customer -> Show ONLY their bookings ({ guestId: user.mongoId })
+    const isStaff = user.roles.some((r: string) => ['admin', 'receptionist', 'manager'].includes(r));
     const filter: any = isStaff ? {} : { guestId: user.mongoId };
     
     const bookings = await Booking.find(filter)
-      .populate('roomId') // ✅ Get Room Details (Number, Type)
-      .populate('guestId', 'name email phone') // ✅ Get Guest Details (Name, Email) for the Admin Table
+      .populate('roomId')
+      .populate('guestId', 'name email phone')
       .sort({ createdAt: -1 })
       .lean();
       
@@ -36,76 +30,145 @@ bookingsRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// ==========================================
-// POST /api/bookings
-// Create a new booking
-// ==========================================
+// POST /api/bookings - Create Booking
 bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { roomId, checkIn, checkOut, guestId } = req.body as {
-      roomId: string;
-      checkIn: string;
-      checkOut: string;
-      guestId?: string;
-    };
+    let { roomId, checkIn, checkOut, guestId, guest, booking } = req.body;
 
-    // Determine the Guest ID:
-    // 1. If Admin sends 'guestId' in body, use that.
-    // 2. Otherwise, use the logged-in user's 'mongoId'.
+    // --- Handle Front Desk "Complex" Payload ---
+    if (booking && guest) {
+        // 1. Resolve Dates
+        checkIn = booking.checkIn;
+        checkOut = booking.checkOut;
+
+        // 2. Resolve Guest (Find or Create)
+        let existingUser = await User.findOne({ email: guest.email });
+        if (!existingUser) {
+            try {
+                const fbUser = await auth.createUser({
+                    email: guest.email,
+                    password: 'password123', 
+                    displayName: `${guest.firstName} ${guest.lastName}`,
+                    phoneNumber: guest.phone 
+                }).catch(e => {
+                    return auth.createUser({
+                        email: guest.email,
+                        password: 'password123',
+                        displayName: `${guest.firstName} ${guest.lastName}`
+                    });
+                });
+
+                existingUser = await User.create({
+                    uid: fbUser.uid,
+                    name: `${guest.firstName} ${guest.lastName}`,
+                    email: guest.email,
+                    phone: guest.phone,
+                    roles: ['customer']
+                });
+            } catch (err) {
+                console.error("Guest Creation Error:", err);
+                return res.status(400).json({ error: 'Failed to create guest profile. Email might be taken.' });
+            }
+        }
+        guestId = existingUser._id;
+
+        // 3. Resolve Room (Find Available by Type)
+        if (!roomId && booking.roomType) {
+            const roomsOfType = await Room.find({ type: { $regex: new RegExp(booking.roomType, 'i') } });
+            
+            const start = new Date(checkIn);
+            const end = new Date(checkOut);
+            
+            let availableRoom = null;
+            
+            for (const r of roomsOfType) {
+                const conflict = await Booking.findOne({
+                    roomId: r._id,
+                    status: { $in: ['Confirmed', 'CheckedIn'] },
+                    $or: [
+                        { checkIn: { $lt: end }, checkOut: { $gt: start } }
+                    ]
+                });
+                if (!conflict) {
+                    availableRoom = r;
+                    break;
+                }
+            }
+
+            if (!availableRoom) {
+                return res.status(409).json({ error: `No available ${booking.roomType} rooms for these dates` });
+            }
+            roomId = availableRoom._id;
+        }
+    }
+    // -------------------------------------------
+
     const finalGuestId = guestId || user.mongoId;
     
-    if (!finalGuestId) {
-      return res.status(400).json({ error: "User profile not found. Please refresh or contact support." });
-    }
-
-    const room = await Room.findById(roomId);
-    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (!finalGuestId) return res.status(400).json({ error: "Guest identity missing." });
+    if (!roomId) return res.status(400).json({ error: "Room not selected or available." });
 
     const start = new Date(checkIn);
     const end = new Date(checkOut);
     
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return res.status(400).json({ error: 'Invalid dates' });
-    }
-    if (start >= end) {
-        return res.status(400).json({ error: 'Check-out must be after check-in' });
-    }
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return res.status(400).json({ error: 'Invalid dates' });
+    if (start >= end) return res.status(400).json({ error: 'Check-out must be after check-in' });
 
-    // Check for overlaps
     const overlapping = await Booking.findOne({
       roomId,
-      status: { $in: ['Pending', 'Confirmed', 'CheckedIn'] },
+      status: { $in: ['Confirmed', 'CheckedIn'] },
       $or: [
         { checkIn: { $lt: end }, checkOut: { $gt: start } },
       ],
     });
 
-    if (overlapping) {
-        return res.status(409).json({ error: 'Room is already booked for these dates' });
-    }
+    if (overlapping) return res.status(409).json({ error: 'Room is already booked for these dates' });
 
-    // Create the booking
-    const created = await Booking.create({
-      roomId: room._id,
-      guestId: finalGuestId, // ✅ Saves the correct MongoDB User ID
+    const newBooking = await Booking.create({
+      roomId,
+      guestId: finalGuestId,
       checkIn: start,
       checkOut: end,
-      status: 'Confirmed',
-      source: 'Local',
+      status: (booking && booking.status === 'checked-in') ? 'CheckedIn' : 'Confirmed',
+      source: 'FrontDesk',
     });
     
-    res.status(201).json(created);
+    if (newBooking.status === 'CheckedIn') {
+        await Room.findByIdAndUpdate(roomId, { status: 'Occupied' });
+    }
+
+    res.status(201).json(newBooking);
   } catch (err: any) {
     console.error("Create Booking Error:", err);
     res.status(400).json({ error: err.message || 'Failed to create booking' });
   }
 });
 
-// ==========================================
-// POST /api/bookings/:id/checkin
-// Check-in a guest (Staff only)
-// ==========================================
+// PUT /api/bookings/:id
+bookingsRouter.put('/:id', requireRoles('admin', 'receptionist', 'manager'), async (req: Request, res: Response) => {
+  try {
+    const updates = req.body;
+    const booking = await Booking.findByIdAndUpdate(req.params.id, updates, { new: true });
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    res.json(booking);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update booking' });
+  }
+});
+
+// DELETE /api/bookings/:id
+bookingsRouter.delete('/:id', requireRoles('admin', 'manager'), async (req: Request, res: Response) => {
+  try {
+    const booking = await Booking.findByIdAndDelete(req.params.id);
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    res.json({ message: 'Booking deleted' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete booking' });
+  }
+});
+
+// ✅ ADDED: POST /api/bookings/:id/checkin
 bookingsRouter.post('/:id/checkin', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
     const booking = await Booking.findByIdAndUpdate(
@@ -115,19 +178,17 @@ bookingsRouter.post('/:id/checkin', requireRoles('admin', 'receptionist'), async
     );
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
     
-    // Update Room Status
+    // Automatically update Room Status to 'Occupied'
     await Room.findByIdAndUpdate(booking.roomId, { status: 'Occupied' });
     
     res.json(booking);
   } catch (err) {
-    res.status(400).json({ error: 'Failed to check in' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to check in' });
   }
 });
 
-// ==========================================
-// POST /api/bookings/:id/checkout
-// Check-out a guest (Staff only)
-// ==========================================
+// ✅ ADDED: POST /api/bookings/:id/checkout
 bookingsRouter.post('/:id/checkout', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
     const booking = await Booking.findByIdAndUpdate(
@@ -136,21 +197,13 @@ bookingsRouter.post('/:id/checkout', requireRoles('admin', 'receptionist'), asyn
       { new: true }
     );
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    
-    // Mark room as dirty/cleaning
+
+    // Automatically update Room Status to 'Cleaning'
     await Room.findByIdAndUpdate(booking.roomId, { status: 'Cleaning' });
-    
+
     res.json(booking);
   } catch (err) {
-    res.status(400).json({ error: 'Failed to check out' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to check out' });
   }
-});
-
-// ==========================================
-// POST /api/bookings/webhooks/ota
-// (Optional) Webhook for Booking.com / Expedia
-// ==========================================
-bookingsRouter.post('/webhooks/ota', (_req: Request, res: Response) => {
-  // Placeholder for future OTA integration
-  res.status(200).json({ ok: true });
 });
