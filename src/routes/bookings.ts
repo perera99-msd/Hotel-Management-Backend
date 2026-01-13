@@ -32,21 +32,18 @@ bookingsRouter.get('/', async (req: Request, res: Response) => {
 
 /**
  * POST /api/bookings - Create Booking (Handles New Guest)
- * Permanent Logic: Resolve guest identity via Email-First approach
  */
 bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    let { roomId, checkIn, checkOut, guestId, guest, source } = req.body;
+    let { roomId, checkIn, checkOut, guestId, guest, source, status: requestedStatus } = req.body;
 
-    // Permanent Solution: Handle "New Guest" Payload
+    // Handle "New Guest" Payload by finding or creating a local User profile
     if (guest && !guestId) {
       const targetEmail = guest.email.toLowerCase();
       let existingProfile = await User.findOne({ email: targetEmail });
 
       if (!existingProfile) {
-        // Create local user so the booking has a valid guestId reference
-        // This profile can be linked to a Firebase account later if they sign up
         existingProfile = await User.create({
           name: guest.name,
           email: targetEmail,
@@ -77,12 +74,17 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
 
     if (overlapping) return res.status(409).json({ error: 'Room is already booked' });
 
+    // MERGED LOGIC: Check status from requested body or default to Confirmed
+    const finalStatus = (requestedStatus === 'checked-in' || requestedStatus === 'CheckedIn') 
+      ? 'CheckedIn' 
+      : 'Confirmed';
+
     const newBooking = await Booking.create({
       roomId,
       guestId: finalGuestId,
       checkIn: start,
       checkOut: end,
-      status: 'Confirmed',
+      status: finalStatus,
       source: source || 'Local',
     });
 
