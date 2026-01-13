@@ -1,54 +1,113 @@
 import { Router, Request, Response } from 'express';
-import { authenticate, requireRoles } from '../middleware/auth.js';
 import { User } from '../models/user.js';
+import { authenticate, requireRoles } from '../middleware/auth.js';
 import { logger } from '../lib/logger.js';
-import { auth } from '../lib/firebaseAdmin.js'; 
+import admin from '../lib/firebaseAdmin.js'; // Ensure correct import for Firebase Admin
 
 export const userRouter = Router();
 
 /**
- * @route POST /api/users/register
- * @desc Sync a new Firebase user to MongoDB immediately after sign-up
- * @access Private (Verified Firebase User)
+ * POST /api/users/register
+ * Links Firebase accounts to existing guest profiles or creates new ones
+ * This handles the sync after a user registers via Firebase on the frontend.
  */
-userRouter.post('/register', authenticate(), async (req: Request, res: Response) => {
+userRouter.post('/register', async (req: Request, res: Response) => {
   try {
-    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { uid, email, name, phone } = req.body;
 
-    const { name, email, phone } = req.body;
-
-    // Check if user already exists in MongoDB to prevent duplicate entries
-    let user = await User.findOne({ uid: req.user.uid });
-    
-    if (!user) {
-      user = await User.create({
-        uid: req.user.uid,
-        email: email || req.user.email,
-        name: name || 'New User',
-        phone: phone,
-        roles: ['customer'], // Default role for self-registration
-        status: 'active'
-      });
-      logger.info({ uid: user.uid }, 'New user successfully synced to MongoDB');
-      return res.status(201).json(user);
+    if (!uid || !email) {
+      return res.status(400).json({ error: 'UID and Email are required' });
     }
 
-    // If user already exists, just return the existing record
-    res.status(200).json(user);
+    const targetEmail = email.toLowerCase();
+    let user = await User.findOne({ email: targetEmail });
+
+    // If a guest profile exists with this email, link the Firebase UID
+    if (user) {
+      if (user.uid) {
+        return res.status(400).json({ error: 'User with this email is already registered' });
+      }
+      user.uid = uid;
+      if (name) user.name = name;
+      if (phone) user.phone = phone;
+      await user.save();
+      logger.info({ uid: user.uid }, 'Existing profile linked to Firebase UID');
+      return res.status(200).json({ message: 'Profile linked and registration complete', user });
+    }
+
+    // Otherwise, create a brand new user
+    const newUser = await User.create({
+      uid,
+      email: targetEmail,
+      name: name || 'New User',
+      phone: phone || '',
+      roles: ['customer'],
+      status: 'active'
+    });
+
+    logger.info({ uid: newUser.uid }, 'New user successfully created and synced to MongoDB');
+    res.status(201).json(newUser);
   } catch (err: any) {
     logger.error({ err }, 'Registration sync failed');
-    res.status(500).json({ error: 'Failed to sync user to database' });
+    res.status(500).json({ error: 'Registration failed due to server error' });
   }
 });
 
 /**
- * Top-level middleware: All routes below this line require authentication
+ * Middleware: All routes below this line require a valid Bearer token
  */
 userRouter.use(authenticate());
 
-// GET /api/users - List all users (Admin/Staff only)
+/**
+ * GET /api/users/me
+ * Retrieves the current logged-in user's profile based on their Firebase UID.
+ * Essential for frontend role-based redirection.
+ */
+userRouter.get('/me', async (req: Request, res: Response) => {
+  try {
+    // req.user is populated by the authenticate() middleware
+    const user = await User.findOne({ uid: req.user?.uid });
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User profile not found in database' });
+    }
+
+    res.json(user);
+  } catch (err: any) {
+    console.error("Error fetching user profile:", err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * PUT /api/users/me
+ * Allows users to update their own profile information
+ */
+userRouter.put('/me', async (req: Request, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { name, phone } = req.body; 
+    
+    const user = await User.findOneAndUpdate(
+      { uid: req.user.uid },
+      { name, phone },
+      { new: true }
+    );
+    
+    res.json(user);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+/**
+ * GET /api/users
+ * List users (Admin/Staff only). 
+ * Used by staff to select a guest for a new booking.
+ */
 userRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req: Request, res: Response) => {
   try {
+    // Return users sorted by creation date
     const users = await User.find({}).sort({ createdAt: -1 });
     res.json(users);
   } catch (err) {
@@ -57,50 +116,23 @@ userRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req
   }
 });
 
-// GET /api/users/me - Current Profile
-userRouter.get('/me', async (req: Request, res: Response) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-    const user = await User.findOne({ uid: req.user.uid });
-    res.json(user || {});
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch profile' });
-  }
-});
-
-// PUT /api/users/me - Update Current Profile
-userRouter.put('/me', async (req: Request, res: Response) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-    const { name, phone } = req.body; 
-    const user = await User.findOneAndUpdate(
-      { uid: req.user.uid },
-      { name, phone },
-      { new: true }
-    );
-    res.json(user);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update profile' });
-  }
-});
-
-// POST /api/users/create - Admin explicitly creates a user
+/**
+ * POST /api/users/create
+ * Admin explicitly creates a user profile
+ */
 userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
-    const { email, password, name, role, phone } = req.body;
-    const firebaseUser = await auth.createUser({
-      email,
-      password: password || 'password123',
-      displayName: name,
-    });
+    const { uid, email, name, phone, role } = req.body;
+
     const newUser = await User.create({
-      uid: firebaseUser.uid,
-      email,
+      uid,
+      email: email.toLowerCase(),
       name,
-      phone,
+      phone: phone || '',
       roles: [role || 'customer'],
       status: 'active'
     });
+
     res.status(201).json(newUser);
   } catch (err: any) {
     logger.error({ err }, 'Create user failed');
@@ -108,13 +140,16 @@ userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Resp
   }
 });
 
-// PUT /api/users/:id - Admin Update User
+/**
+ * PUT /api/users/:id
+ * Admin updates a specific user's details or role
+ */
 userRouter.put('/:id', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
-    const { name, role, status } = req.body;
+    const { name, role, status, phone } = req.body;
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { name, roles: [role], status }, 
+      { name, roles: [role], status, phone }, 
       { new: true }
     );
     res.json(user);
@@ -123,16 +158,23 @@ userRouter.put('/:id', requireRoles('admin'), async (req: Request, res: Response
   }
 });
 
-// DELETE /api/users/:id - Admin Delete User
+/**
+ * DELETE /api/users/:id
+ * Admin deletes a user from MongoDB and attempts to remove from Firebase
+ */
 userRouter.delete('/:id', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
+    
     try {
-      await auth.deleteUser(user.uid);
+      if (user.uid) {
+        await admin.auth().deleteUser(user.uid);
+      }
     } catch (fbErr) {
       logger.warn({ fbErr }, 'Failed to delete from Firebase, deleting local only');
     }
+
     await User.findByIdAndDelete(req.params.id);
     res.json({ message: 'User deleted' });
   } catch (err) {
