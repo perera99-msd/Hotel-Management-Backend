@@ -6,40 +6,47 @@ import { auth } from '../lib/firebaseAdmin.js';
 
 export const userRouter = Router();
 
-// 1. PUBLIC REGISTRATION ROUTE (Must be defined BEFORE the top-level middleware if you want it completely open, 
-// but since we need the Firebase UID, we use authenticate() but NOT requireRoles())
+/**
+ * @route POST /api/users/register
+ * @desc Sync a new Firebase user to MongoDB immediately after sign-up
+ * @access Private (Verified Firebase User)
+ */
 userRouter.post('/register', authenticate(), async (req: Request, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
     const { name, email, phone } = req.body;
 
-    // Prevent duplicate entries in MongoDB
-    const existingUser = await User.findOne({ uid: req.user.uid });
-    if (existingUser) {
-      return res.status(200).json(existingUser); // Already synced
+    // Check if user already exists in MongoDB to prevent duplicate entries
+    let user = await User.findOne({ uid: req.user.uid });
+    
+    if (!user) {
+      user = await User.create({
+        uid: req.user.uid,
+        email: email || req.user.email,
+        name: name || 'New User',
+        phone: phone,
+        roles: ['customer'], // Default role for self-registration
+        status: 'active'
+      });
+      logger.info({ uid: user.uid }, 'New user successfully synced to MongoDB');
+      return res.status(201).json(user);
     }
 
-    const newUser = await User.create({
-      uid: req.user.uid,
-      email: email || req.user.email,
-      name: name,
-      phone: phone,
-      roles: ['customer'],
-      status: 'active'
-    });
-
-    res.status(201).json(newUser);
+    // If user already exists, just return the existing record
+    res.status(200).json(user);
   } catch (err: any) {
     logger.error({ err }, 'Registration sync failed');
     res.status(500).json({ error: 'Failed to sync user to database' });
   }
 });
 
-// Top-level middleware for remaining routes
+/**
+ * Top-level middleware: All routes below this line require authentication
+ */
 userRouter.use(authenticate());
 
-// GET /api/users - List all users
+// GET /api/users - List all users (Admin/Staff only)
 userRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req: Request, res: Response) => {
   try {
     const users = await User.find({}).sort({ createdAt: -1 });
@@ -77,7 +84,7 @@ userRouter.put('/me', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/users/create - Admin Create User
+// POST /api/users/create - Admin explicitly creates a user
 userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const { email, password, name, role, phone } = req.body;
@@ -91,7 +98,8 @@ userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Resp
       email,
       name,
       phone,
-      roles: [role || 'customer']
+      roles: [role || 'customer'],
+      status: 'active'
     });
     res.status(201).json(newUser);
   } catch (err: any) {
