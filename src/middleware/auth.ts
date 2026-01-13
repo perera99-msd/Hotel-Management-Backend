@@ -3,12 +3,11 @@ import admin from '../lib/firebaseAdmin.js';
 import { logger } from '../lib/logger.js';
 import { User } from '../models/user.js'; 
 
-// 1. Update Interface to include mongoId
 export interface AuthUser {
   uid: string;
   email?: string;
   roles: string[];
-  mongoId?: string; // ✅ Added this
+  mongoId?: string;
 }
 
 declare global {
@@ -30,20 +29,18 @@ export function authenticate() {
 
       const token = authHeader.split(' ')[1];
 
-      // 1. Verify Token
+      // 1. Verify Firebase Token
       const decodedToken = await admin.auth().verifyIdToken(token);
 
-      // 2. Fetch User from MongoDB
+      // 2. Fetch User from MongoDB (if they exist)
       const dbUser = await User.findOne({ uid: decodedToken.uid }).lean();
       
-      const roles = dbUser?.roles || ['customer'];
-
-      // 3. Attach MongoDB _id to the request
+      // 3. Attach info. For new registrations, dbUser will be null.
       req.user = {
         uid: decodedToken.uid,
         email: decodedToken.email,
-        roles: roles,
-        mongoId: dbUser?._id?.toString(), // ✅ PASS REAL MONGODB ID
+        roles: dbUser?.roles || ['customer'],
+        mongoId: dbUser?._id?.toString(),
       };
 
       next();
@@ -59,6 +56,8 @@ export function requireRoles(...allowed: string[]) {
     const user = req.user;
     if (!user) return res.status(401).json({ error: 'Unauthenticated' });
 
+    // If a mongoId doesn't exist yet, they can only access the registration route
+    // (This check happens inside the specific routes via logic below)
     if (!allowed.length) return next();
 
     const hasRole = user.roles.some((r) => allowed.includes(r));

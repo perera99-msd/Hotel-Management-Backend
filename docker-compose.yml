@@ -1,14 +1,7 @@
 version: "3.9"
+
 services:
-  keycloak:
-    image: quay.io/keycloak/keycloak:24.0
-    command: start-dev --http-port=8080
-    environment:
-      KC_DB: dev-file
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-    ports:
-      - "8080:8080"
+  # MongoDB Replica Set (Members)
   mongo1:
     image: mongo:7
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
@@ -16,6 +9,7 @@ services:
       - "27017:27017"
     volumes:
       - mongo1:/data/db
+
   mongo2:
     image: mongo:7
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
@@ -23,6 +17,7 @@ services:
       - "27018:27017"
     volumes:
       - mongo2:/data/db
+
   mongo3:
     image: mongo:7
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
@@ -30,35 +25,39 @@ services:
       - "27019:27017"
     volumes:
       - mongo3:/data/db
+
+  # Initialization container for MongoDB Replica Set
   mongo-init:
     image: mongo:7
     depends_on:
       - mongo1
       - mongo2
       - mongo3
-    entrypoint: ["sh", "-c", "sleep 5 && mongosh --host mongo1:27017 --eval 'rs.initiate({_id: \"rs0\", members: [{ _id: 0, host: \"mongo1:27017\" }, { _id: 1, host: \"mongo2:27017\" }, { _id: 2, host: \"mongo3:27017\" }]})' || true"]
+    entrypoint: 
+      - "sh"
+      - "-c"
+      - |
+        sleep 5 && \
+        mongosh --host mongo1:27017 --eval 'rs.initiate({_id: "rs0", members: [{ _id: 0, host: "mongo1:27017" }, { _id: 1, host: "mongo2:27017" }, { _id: 2, host: "mongo3:27017" }]})' || true
+
+  # The Hotel Management Backend service
   app:
     build: .
-    environment:
-      PORT: 3000
-      NODE_ENV: development
-      LOG_LEVEL: debug
-      MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/hotel?replicaSet=rs0
-      KEYCLOAK_ISSUER: http://keycloak:8080/realms/hotel-realm
-      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hotel-realm/protocol/openid-connect/certs
-      KEYCLOAK_AUDIENCE: hotel-backend
     ports:
       - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=development
+      - LOG_LEVEL=debug
+      - MONGO_URI=mongodb://mongo1:27017,mongo2:27017,mongo3:27017/hotel?replicaSet=rs0
+      # Pass Firebase credentials from your local .env file
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
     depends_on:
-      - keycloak
       - mongo-init
+
 volumes:
   mongo1:
   mongo2:
   mongo3:
-
-
-
-
-
-

@@ -1,12 +1,42 @@
-/* */
 import { Router, Request, Response } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { User } from '../models/user.js';
 import { logger } from '../lib/logger.js';
-// ✅ FIX: Now works because firebaseAdmin.ts exports 'auth'
 import { auth } from '../lib/firebaseAdmin.js'; 
 
 export const userRouter = Router();
+
+// 1. PUBLIC REGISTRATION ROUTE (Must be defined BEFORE the top-level middleware if you want it completely open, 
+// but since we need the Firebase UID, we use authenticate() but NOT requireRoles())
+userRouter.post('/register', authenticate(), async (req: Request, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { name, email, phone } = req.body;
+
+    // Prevent duplicate entries in MongoDB
+    const existingUser = await User.findOne({ uid: req.user.uid });
+    if (existingUser) {
+      return res.status(200).json(existingUser); // Already synced
+    }
+
+    const newUser = await User.create({
+      uid: req.user.uid,
+      email: email || req.user.email,
+      name: name,
+      phone: phone,
+      roles: ['customer'],
+      status: 'active'
+    });
+
+    res.status(201).json(newUser);
+  } catch (err: any) {
+    logger.error({ err }, 'Registration sync failed');
+    res.status(500).json({ error: 'Failed to sync user to database' });
+  }
+});
+
+// Top-level middleware for remaining routes
 userRouter.use(authenticate());
 
 // GET /api/users - List all users
@@ -51,13 +81,11 @@ userRouter.put('/me', async (req: Request, res: Response) => {
 userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const { email, password, name, role, phone } = req.body;
-    // 1. Create in Firebase
     const firebaseUser = await auth.createUser({
       email,
       password: password || 'password123',
       displayName: name,
     });
-    // 2. Create in MongoDB
     const newUser = await User.create({
       uid: firebaseUser.uid,
       email,
