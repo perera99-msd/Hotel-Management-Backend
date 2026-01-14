@@ -2,14 +2,13 @@ import { Router, Request, Response } from 'express';
 import { User } from '../models/user.js';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { logger } from '../lib/logger.js';
-import admin from '../lib/firebaseAdmin.js'; // Ensure correct import for Firebase Admin
+import admin from '../lib/firebaseAdmin.js'; 
 
 export const userRouter = Router();
 
 /**
  * POST /api/users/register
  * Links Firebase accounts to existing guest profiles or creates new ones
- * This handles the sync after a user registers via Firebase on the frontend.
  */
 userRouter.post('/register', async (req: Request, res: Response) => {
   try {
@@ -24,14 +23,13 @@ userRouter.post('/register', async (req: Request, res: Response) => {
 
     // If a guest profile exists with this email, link the Firebase UID
     if (user) {
-      if (user.uid) {
+      if (user.uid && user.uid !== uid) {
         return res.status(400).json({ error: 'User with this email is already registered' });
       }
       user.uid = uid;
       if (name) user.name = name;
       if (phone) user.phone = phone;
       await user.save();
-      logger.info({ uid: user.uid }, 'Existing profile linked to Firebase UID');
       return res.status(200).json({ message: 'Profile linked and registration complete', user });
     }
 
@@ -45,7 +43,6 @@ userRouter.post('/register', async (req: Request, res: Response) => {
       status: 'active'
     });
 
-    logger.info({ uid: newUser.uid }, 'New user successfully created and synced to MongoDB');
     res.status(201).json(newUser);
   } catch (err: any) {
     logger.error({ err }, 'Registration sync failed');
@@ -60,12 +57,9 @@ userRouter.use(authenticate());
 
 /**
  * GET /api/users/me
- * Retrieves the current logged-in user's profile based on their Firebase UID.
- * Essential for frontend role-based redirection.
  */
 userRouter.get('/me', async (req: Request, res: Response) => {
   try {
-    // req.user is populated by the authenticate() middleware
     const user = await User.findOne({ uid: req.user?.uid });
     
     if (!user) {
@@ -81,7 +75,6 @@ userRouter.get('/me', async (req: Request, res: Response) => {
 
 /**
  * PUT /api/users/me
- * Allows users to update their own profile information
  */
 userRouter.put('/me', async (req: Request, res: Response) => {
   try {
@@ -102,8 +95,7 @@ userRouter.put('/me', async (req: Request, res: Response) => {
 
 /**
  * GET /api/users
- * List users (Admin/Staff only). 
- * Used by staff to select a guest for a new booking.
+ * List users (Admin/Staff only)
  */
 userRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req: Request, res: Response) => {
   try {
@@ -117,21 +109,90 @@ userRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req
 });
 
 /**
+ * POST /api/users/guest
+ * ✅ NEW ENDPOINT: Create a shadow/walk-in guest without password/Firebase
+ * Used by "New Booking" modal
+ */
+userRouter.post('/guest', requireRoles('admin', 'receptionist', 'manager'), async (req: Request, res: Response) => {
+  try {
+    const { email, name, phone } = req.body;
+    
+    if (!email || !name) {
+        return res.status(400).json({ error: "Name and Email are required" });
+    }
+    
+    const targetEmail = email.toLowerCase().trim();
+    
+    // Check if user already exists
+    let user = await User.findOne({ email: targetEmail });
+    if (user) {
+        // Return existing user so booking can proceed
+        return res.status(200).json(user);
+    }
+
+    // Create new shadow user (no UID)
+    user = await User.create({
+      email: targetEmail,
+      name,
+      phone: phone || '',
+      roles: ['customer'],
+      status: 'active'
+    });
+    
+    res.status(201).json(user);
+  } catch (err: any) {
+    console.error("Guest Creation Error:", err);
+    res.status(500).json({ error: 'Failed to create guest user' });
+  }
+});
+
+/**
  * POST /api/users/create
- * Admin explicitly creates a user profile
+ * Admin explicitly creates a user profile (with Firebase Auth)
  */
 userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
-    const { uid, email, name, phone, role } = req.body;
+    const { email, name, phone, role, password } = req.body;
 
-    const newUser = await User.create({
-      uid,
-      email: email.toLowerCase(),
-      name,
-      phone: phone || '',
-      roles: [role || 'customer'],
-      status: 'active'
-    });
+    if (!email || !password) {
+        return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    // 1. Create in Firebase
+    let firebaseUser;
+    try {
+        firebaseUser = await admin.auth().createUser({
+            email,
+            password,
+            displayName: name,
+            phoneNumber: phone || undefined
+        });
+    } catch (firebaseError: any) {
+        // If user already exists in Firebase, try to find them
+        if (firebaseError.code === 'auth/email-already-exists') {
+             try {
+                 firebaseUser = await admin.auth().getUserByEmail(email);
+             } catch (e) {
+                 return res.status(500).json({ error: "User exists in Auth but could not be retrieved." });
+             }
+        } else {
+            return res.status(400).json({ error: `Firebase Error: ${firebaseError.message}` });
+        }
+    }
+
+    // 2. Create/Update in MongoDB
+    const newUser = await User.findOneAndUpdate(
+        { email: email.toLowerCase() },
+        {
+            uid: firebaseUser.uid,
+            email: email.toLowerCase(),
+            name,
+            phone: phone || '',
+            roles: [role || 'customer'],
+            status: 'active'
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     res.status(201).json(newUser);
   } catch (err: any) {
@@ -160,7 +221,7 @@ userRouter.put('/:id', requireRoles('admin'), async (req: Request, res: Response
 
 /**
  * DELETE /api/users/:id
- * Admin deletes a user from MongoDB and attempts to remove from Firebase
+ * Admin deletes a user
  */
 userRouter.delete('/:id', requireRoles('admin'), async (req: Request, res: Response) => {
   try {

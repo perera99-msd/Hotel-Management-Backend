@@ -1,4 +1,3 @@
-/* */
 import { Router, Request, Response } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Room } from '../models/room.js';
@@ -128,7 +127,7 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
 
     const roomTypesData = Array.from(roomTypesMap.values());
 
-    // 4. Mock/Generate Occupancy Trend 
+    // 4. Mock/Generate Occupancy Trend (Kept for dashboard overview widget)
     const occupancyData = [
       { name: "Jan", percentage: 65 }, { name: "Feb", percentage: 70 },
       { name: "Mar", percentage: 75 }, { name: "Apr", percentage: 60 },
@@ -138,7 +137,7 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
       { name: "Nov", percentage: 85 }, { name: "Dec", percentage: 90 },
     ];
 
-    // 5. Mock Feedback
+    // 5. Mock Feedback (Since no Feedback model exists yet)
     const feedback = [
       { guest: "Mark", comment: "Food could be better.", room: "A201" },
       { guest: "Christian", comment: "Facilities are not enough for amount paid.", room: "A101" },
@@ -188,10 +187,13 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
     const totalRoomsCount = rooms.length;
     const roomMap = new Map(rooms.map(r => [r._id.toString(), r]));
     
+    // Fetch bookings that overlap with the 6-month window
     const bookings = await Booking.find({
       $or: [
         { checkIn: { $gte: sixMonthsAgo.toDate() } },
-        { checkOut: { $gte: sixMonthsAgo.toDate() } }
+        { checkOut: { $gte: sixMonthsAgo.toDate() } },
+        // Also catch bookings that span across the entire window
+        { checkIn: { $lte: sixMonthsAgo.toDate() }, checkOut: { $gte: today.toDate() } }
       ],
       status: { $in: ['Confirmed', 'CheckedIn', 'CheckedOut'] }
     }).lean();
@@ -204,6 +206,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
     const monthlyData = [];
     let currentIterMonth = sixMonthsAgo.clone();
 
+    // Iterate month by month
     while (currentIterMonth.isBefore(today.add(1, 'month'))) {
       const monthStart = currentIterMonth.startOf('month');
       const monthEnd = currentIterMonth.endOf('month');
@@ -218,14 +221,17 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
         const bStart = dayjs(b.checkIn);
         const bEnd = dayjs(b.checkOut);
         
+        // Calculate overlap with this month
         const effectiveStart = bStart.isAfter(monthStart) ? bStart : monthStart;
         const effectiveEnd = bEnd.isBefore(monthEnd) ? bEnd : monthEnd;
 
         if (effectiveEnd.isAfter(effectiveStart)) {
           const nights = effectiveEnd.diff(effectiveStart, 'day');
           const room = roomMap.get((b.roomId as any).toString());
+          
           if (room) {
             occupiedNights += nights;
+            // Revenue Attribution: (Nightly Rate * Nights in this month)
             monthRoomRevenue += (room.rate * nights);
           }
         }
@@ -246,12 +252,15 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
       currentIterMonth = currentIterMonth.add(1, 'month');
     }
 
+    // Room Type Distribution Stats
     const roomTypeStats: Record<string, { value: number, revenue: number }> = {};
     bookings.forEach(b => {
       const room = roomMap.get((b.roomId as any).toString());
       if (room) {
+         // Calculate total value of booking (approximate based on current rate if totalAmount missing)
          const nights = Math.max(1, dayjs(b.checkOut).diff(dayjs(b.checkIn), 'day'));
-         const val = room.rate * nights;
+         const val = (b as any).totalAmount || (room.rate * nights);
+         
          if (!roomTypeStats[room.type]) roomTypeStats[room.type] = { value: 0, revenue: 0 };
          roomTypeStats[room.type].value += 1;
          roomTypeStats[room.type].revenue += val;
@@ -264,6 +273,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
       revenue: roomTypeStats[type].revenue
     }));
 
+    // Daily Occupancy (Last 7 Days)
     const dailyOccupancy = [];
     for (let i = 6; i >= 0; i--) {
       const day = today.subtract(i, 'day');
@@ -273,6 +283,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
       const occupiedCount = bookings.filter(b => {
         const start = dayjs(b.checkIn);
         const end = dayjs(b.checkOut);
+        // Is occupied if booking starts before end of day AND ends after start of day
         return start.isBefore(dayEnd) && end.isAfter(dayStart);
       }).length;
 
@@ -304,12 +315,12 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
       revenue: currentMonthData.revenue,
       revenueChange: calculateChange(currentMonthData.revenue, prevMonthData.revenue),
       totalRooms: totalRoomsCount,
-      avgRating: 4.8 
+      avgRating: 4.8 // Fallback as Feedback model is not yet implemented
     };
 
     const guestSatisfaction = monthlyData.map(m => ({
         month: m.name,
-        rating: 4.0 + (Math.random() * 1) 
+        rating: 4.0 + (Math.random() * 1) // Mock data until Feedback module is active
     }));
 
     res.json({ metrics, occupancyData: monthlyData, roomTypeData, revenueSources, dailyOccupancy, guestSatisfaction });
@@ -335,15 +346,19 @@ reportsRouter.get('/export/:type', requireRoles('admin', 'receptionist'), async 
     if (type === 'occupancy') {
       fields = ['Date', 'TotalRooms', 'Occupied', 'OccupancyRate'];
       const totalRooms = await Room.countDocuments();
-      for (let i = 29; i >= 0; i--) {
+      
+      // Last 30 Days
+      for (let i = 0; i < 30; i++) {
         const date = today.subtract(i, 'day');
         const start = date.startOf('day').toDate();
         const end = date.endOf('day').toDate();
+        
         const occupied = await Booking.countDocuments({
           checkIn: { $lte: end },
           checkOut: { $gte: start },
           status: { $in: ['Confirmed', 'CheckedIn'] }
         });
+
         data.push({
           Date: date.format('YYYY-MM-DD'),
           TotalRooms: totalRooms,
@@ -354,15 +369,30 @@ reportsRouter.get('/export/:type', requireRoles('admin', 'receptionist'), async 
 
     } else if (type === 'revenue') {
       fields = ['Month', 'RoomRevenue', 'FoodAndBevRevenue', 'TotalRevenue'];
-      for (let i = 5; i >= 0; i--) {
+      
+      // Last 6 Months
+      for (let i = 0; i < 6; i++) {
         const date = today.subtract(i, 'month');
         const start = date.startOf('month');
         const end = date.endOf('month');
         
-        const bookings = await Booking.find({ createdAt: { $gte: start.toDate(), $lte: end.toDate() }, status: 'CheckedOut' }).populate('roomId');
-        const roomRev = bookings.reduce((sum, b: any) => sum + (b.roomId?.rate || 0), 0);
+        // Find bookings that CHECKED OUT in this month (Realized Revenue)
+        const bookings = await Booking.find({ 
+            checkOut: { $gte: start.toDate(), $lte: end.toDate() }, 
+            status: { $in: ['CheckedOut', 'CheckedIn'] } 
+        }).populate('roomId');
         
-        const orders = await Order.find({ createdAt: { $gte: start.toDate(), $lte: end.toDate() }, status: { $ne: 'Cancelled' } });
+        // Calculate Revenue: Use totalAmount if exists, else (nights * rate)
+        const roomRev = bookings.reduce((sum, b: any) => {
+             const nights = dayjs(b.checkOut).diff(dayjs(b.checkIn), 'day') || 1;
+             const amount = b.totalAmount || ((b.roomId?.rate || 0) * nights);
+             return sum + amount;
+        }, 0);
+        
+        const orders = await Order.find({ 
+            createdAt: { $gte: start.toDate(), $lte: end.toDate() }, 
+            status: { $ne: 'Cancelled' } 
+        });
         const fnbRev = orders.reduce((sum, o) => sum + o.totalAmount, 0);
 
         data.push({

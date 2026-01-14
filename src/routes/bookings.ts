@@ -2,7 +2,6 @@ import { Router, Request, Response } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
 import { Room } from '../models/room.js';
-import { User } from '../models/user.js';
 
 export const bookingsRouter = Router();
 
@@ -31,33 +30,20 @@ bookingsRouter.get('/', async (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/bookings - Create Booking (Handles New Guest)
+ * POST /api/bookings
+ * Expects a valid 'guestId'. Frontend must create guest first using /api/users/guest
  */
 bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    let { roomId, checkIn, checkOut, guestId, guest, source, status: requestedStatus } = req.body;
+    const { roomId, checkIn, checkOut, guestId, source, status: requestedStatus } = req.body;
 
-    // Handle "New Guest" Payload by finding or creating a local User profile
-    if (guest && !guestId) {
-      const targetEmail = guest.email.toLowerCase();
-      let existingProfile = await User.findOne({ email: targetEmail });
-
-      if (!existingProfile) {
-        existingProfile = await User.create({
-          name: guest.name,
-          email: targetEmail,
-          phone: guest.phone || '',
-          roles: ['customer'],
-          status: 'active'
-        });
-      }
-      guestId = existingProfile._id;
+    // Strict validation: we no longer handle "New Guest" objects here.
+    if (!guestId) {
+        return res.status(400).json({ error: "Guest identity missing. Please select or create a guest." });
     }
-
-    const finalGuestId = guestId || user.mongoId;
-    if (!finalGuestId) return res.status(400).json({ error: "Guest identity missing." });
-    if (!roomId) return res.status(400).json({ error: "Room not selected." });
+    if (!roomId) {
+        return res.status(400).json({ error: "Room not selected." });
+    }
 
     const start = new Date(checkIn);
     const end = new Date(checkOut);
@@ -72,23 +58,28 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
       $or: [{ checkIn: { $lt: end }, checkOut: { $gt: start } }],
     });
 
-    if (overlapping) return res.status(409).json({ error: 'Room is already booked' });
+    if (overlapping) return res.status(409).json({ error: 'Room is already booked for these dates' });
 
-    // MERGED LOGIC: Check status from requested body or default to Confirmed
     const finalStatus = (requestedStatus === 'checked-in' || requestedStatus === 'CheckedIn') 
       ? 'CheckedIn' 
       : 'Confirmed';
 
     const newBooking = await Booking.create({
       roomId,
-      guestId: finalGuestId,
+      guestId,
       checkIn: start,
       checkOut: end,
       status: finalStatus,
       source: source || 'Local',
     });
 
+    // If immediate check-in, update room status
+    if (finalStatus === 'CheckedIn') {
+        await Room.findByIdAndUpdate(roomId, { status: 'Occupied' });
+    }
+
     res.status(201).json(newBooking);
+
   } catch (err: any) {
     console.error("Create Booking Error:", err);
     res.status(500).json({ error: 'An internal error occurred while creating the booking' });
@@ -121,7 +112,9 @@ bookingsRouter.delete('/:id', requireRoles('admin', 'manager'), async (req: Requ
   }
 });
 
-// POST /api/bookings/:id/checkin
+/**
+ * POST /api/bookings/:id/checkin
+ */
 bookingsRouter.post('/:id/checkin', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
     const booking = await Booking.findByIdAndUpdate(req.params.id, { status: 'CheckedIn' }, { new: true });
@@ -133,7 +126,9 @@ bookingsRouter.post('/:id/checkin', requireRoles('admin', 'receptionist'), async
   }
 });
 
-// POST /api/bookings/:id/checkout
+/**
+ * POST /api/bookings/:id/checkout
+ */
 bookingsRouter.post('/:id/checkout', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
     const booking = await Booking.findByIdAndUpdate(req.params.id, { status: 'CheckedOut' }, { new: true });
