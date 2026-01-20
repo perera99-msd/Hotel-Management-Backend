@@ -1,4 +1,3 @@
-/* */
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
 
@@ -15,7 +14,11 @@ if (!admin.apps.length) {
   });
 }
 
-// ✅ CRITICAL FIX: Named export for Auth service
+// Export Auth
 export const auth = admin.auth();
+
+// Export Firestore Database
+// If your database name in console is "(default)", this works:
+export const db = admin.firestore();
 
 export default admin;

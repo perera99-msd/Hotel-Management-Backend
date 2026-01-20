@@ -1,69 +1,75 @@
 import { Router, Request, Response } from 'express';
+import mongoose from 'mongoose'; 
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
 import { Room } from '../models/room.js';
+import { User } from '../models/user.js'; 
+import { sendNotification } from '../services/notificationService.js';
 
 export const bookingsRouter = Router();
 
 bookingsRouter.use(authenticate());
 
-/**
- * GET /api/bookings - List all bookings
- */
+// --- GET: List Bookings ---
 bookingsRouter.get('/', async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    const isStaff = user.roles.some((r: string) => ['admin', 'receptionist', 'manager'].includes(r));
-    const filter: any = isStaff ? {} : { guestId: user.mongoId };
-    
-    const bookings = await Booking.find(filter)
-      .populate('roomId')
-      .populate('guestId', 'name email phone')
-      .sort({ createdAt: -1 })
-      .lean();
+    try {
+      const user = (req as any).user;
+      const isStaff = user.roles.some((r: string) => ['admin', 'receptionist', 'manager'].includes(r));
+      const filter: any = isStaff ? {} : { guestId: user.mongoId };
       
-    res.json(bookings);
-  } catch (err) {
-    console.error("Error fetching bookings:", err);
-    res.status(500).json({ error: 'Failed to fetch bookings' });
-  }
+      const bookings = await Booking.find(filter)
+        .populate('roomId')
+        .populate('guestId', 'name email phone')
+        .sort({ createdAt: -1 })
+        .lean();
+        
+      res.json(bookings);
+    } catch (err) {
+      console.error("Error fetching bookings:", err);
+      res.status(500).json({ error: 'Failed to fetch bookings' });
+    }
 });
 
-/**
- * POST /api/bookings
- * Expects a valid 'guestId'. Frontend must create guest first using /api/users/guest
- */
+// --- POST: Create Booking ---
 bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), async (req: Request, res: Response) => {
   try {
     const { roomId, checkIn, checkOut, guestId, source, status: requestedStatus } = req.body;
 
-    // Strict validation: we no longer handle "New Guest" objects here.
-    if (!guestId) {
-        return res.status(400).json({ error: "Guest identity missing. Please select or create a guest." });
+    console.log("📝 [Booking Attempt]", { roomId, guestId, checkIn, checkOut });
+
+    // 1. Validate ID Formats
+    if (!guestId || !mongoose.Types.ObjectId.isValid(guestId)) {
+        return res.status(400).json({ error: "Invalid Guest ID. Must be a valid MongoDB ObjectId." });
     }
-    if (!roomId) {
-        return res.status(400).json({ error: "Room not selected." });
+    if (!roomId || !mongoose.Types.ObjectId.isValid(roomId)) {
+        return res.status(400).json({ error: "Invalid Room ID." });
     }
 
     const start = new Date(checkIn);
     const end = new Date(checkOut);
     
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) return res.status(400).json({ error: 'Invalid dates' });
-    if (start >= end) return res.status(400).json({ error: 'Check-out must be after check-in' });
+    // Validate Dates
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        return res.status(400).json({ error: 'Invalid dates provided.' });
+    }
+    if (start >= end) {
+        return res.status(400).json({ error: 'Check-out must be after check-in' });
+    }
 
-    // Availability Check
+    // 2. Availability Check
     const overlapping = await Booking.findOne({
       roomId,
       status: { $in: ['Confirmed', 'CheckedIn'] },
       $or: [{ checkIn: { $lt: end }, checkOut: { $gt: start } }],
     });
 
-    if (overlapping) return res.status(409).json({ error: 'Room is already booked for these dates' });
+    if (overlapping) {
+        return res.status(409).json({ error: 'Room is already booked for these dates' });
+    }
 
-    const finalStatus = (requestedStatus === 'checked-in' || requestedStatus === 'CheckedIn') 
-      ? 'CheckedIn' 
-      : 'Confirmed';
+    const finalStatus = (requestedStatus === 'checked-in' || requestedStatus === 'CheckedIn') ? 'CheckedIn' : 'Confirmed';
 
+    // 3. Create Booking
     const newBooking = await Booking.create({
       roomId,
       guestId,
@@ -71,71 +77,98 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
       checkOut: end,
       status: finalStatus,
       source: source || 'Local',
-    });
+    }) as any;
 
-    // If immediate check-in, update room status
     if (finalStatus === 'CheckedIn') {
         await Room.findByIdAndUpdate(roomId, { status: 'Occupied' });
     }
 
+    console.log(`✅ [Booking Created] ID: ${newBooking._id}`);
+
+    // --- 🔔 NOTIFICATION TRIGGER (FIXED) ---
+    try {
+        const guest = await User.findById(guestId);
+        
+        if (guest) {
+            const message = `Booking Confirmed.\nRoom ID: ${roomId}\nDate: ${start.toLocaleDateString()} - ${end.toLocaleDateString()}`;
+            
+            console.log("🚀 [Notification] Starting sending process...");
+
+            // ⚠️ CRITICAL FIX: 'await' ensures this finishes before response is sent
+            await sendNotification({
+                type: 'BOOKING',
+                title: 'New Booking Received',
+                message: message,
+                recipientEmail: guest.email,
+                recipientPhone: guest.phone, 
+                data: {
+                    // Explicitly convert to string to be safe
+                    bookingId: newBooking._id.toString(),
+                    roomId: roomId.toString(),
+                    guestName: guest.name
+                }
+            });
+            
+            console.log("✅ [Notification] Process Completed");
+        }
+    } catch (notifErr: any) {
+        console.error("❌ [Notification Failed]", notifErr.message);
+    }
+    // --- END NOTIFICATION ---
+
     res.status(201).json(newBooking);
 
   } catch (err: any) {
-    console.error("Create Booking Error:", err);
-    res.status(500).json({ error: 'An internal error occurred while creating the booking' });
+    console.error("❌ CRITICAL BOOKING ERROR:", err);
+    res.status(500).json({ error: `Server Error: ${err.message}` });
   }
 });
 
-/**
- * PUT /api/bookings/:id - Update booking
- */
+// ... (Keep existing PUT/DELETE/CheckIn routes unchanged) ...
+// --- PUT: Update Booking ---
 bookingsRouter.put('/:id', requireRoles('admin', 'receptionist', 'manager'), async (req: Request, res: Response) => {
-  try {
-    const booking = await Booking.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    res.json(booking);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update booking' });
-  }
+    try {
+      const booking = await Booking.findByIdAndUpdate(req.params.id, req.body, { new: true });
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      res.json(booking);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update booking' });
+    }
 });
-
-/**
- * DELETE /api/bookings/:id - Delete booking
- */
+  
+// --- DELETE: Remove Booking ---
 bookingsRouter.delete('/:id', requireRoles('admin', 'manager'), async (req: Request, res: Response) => {
-  try {
-    const booking = await Booking.findByIdAndDelete(req.params.id);
-    if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    res.json({ message: 'Booking deleted' });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to delete booking' });
-  }
+    try {
+      const booking = await Booking.findByIdAndDelete(req.params.id);
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      res.json({ message: 'Booking deleted' });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to delete booking' });
+    }
 });
-
-/**
- * POST /api/bookings/:id/checkin
- */
+  
+// --- POST: Check-In ---
 bookingsRouter.post('/:id/checkin', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
-  try {
-    const booking = await Booking.findByIdAndUpdate(req.params.id, { status: 'CheckedIn' }, { new: true });
-    if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    await Room.findByIdAndUpdate(booking.roomId, { status: 'Occupied' });
-    res.json(booking);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to check in' });
-  }
+    try {
+      const booking = await Booking.findByIdAndUpdate(req.params.id, { status: 'CheckedIn' }, { new: true });
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      
+      await Room.findByIdAndUpdate(booking.roomId, { status: 'Occupied' });
+      res.json(booking);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to check in' });
+    }
 });
-
-/**
- * POST /api/bookings/:id/checkout
- */
+  
+// --- POST: Check-Out ---
 bookingsRouter.post('/:id/checkout', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
-  try {
-    const booking = await Booking.findByIdAndUpdate(req.params.id, { status: 'CheckedOut' }, { new: true });
-    if (!booking) return res.status(404).json({ error: 'Booking not found' });
-    await Room.findByIdAndUpdate(booking.roomId, { status: 'Cleaning' });
-    res.json(booking);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to check out' });
-  }
+    try {
+      const booking = await Booking.findByIdAndUpdate(req.params.id, { status: 'CheckedOut' }, { new: true });
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      
+      await Room.findByIdAndUpdate(booking.roomId, { status: 'Cleaning' });
+      res.json(booking);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to check out' });
+    }
 });

@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
+import { Types } from 'mongoose';
 import { authenticate, requireRoles } from '../middleware/auth.js';
-import { Order, IOrder, IOrderItem } from '../models/order.js';
+import { Order, IOrderItem } from '../models/order.js';
 import { MenuItem } from '../models/menuItem.js';
+import { sendNotification } from '../services/notificationService.js';
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate());
@@ -19,14 +21,13 @@ ordersRouter.get('/', requireRoles('admin', 'receptionist', 'kitchen'), async (_
 // POST /api/orders
 ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async (req: Request, res: Response) => {
   try {
-    // Destructure guestId from body (was missing before)
     const { items, roomNumber, tableNumber, specialNotes, guestName, guestId: bodyGuestId } = req.body;
     
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Items are required' });
     }
 
-    // Enrich items with name and price snapshot
+    // Enrich items with name and price
     const menuItemIds = items.map((i: any) => i.menuItemId);
     const menuItems = await MenuItem.find({ _id: { $in: menuItemIds } }).lean();
     const itemsMap = new Map(menuItems.map((m) => [m._id.toString(), m]));
@@ -45,27 +46,19 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
     const totalAmount = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
     const user = (req as any).user;
 
-    // FIX 1: user.sub does not exist on your AuthUser interface. Use user.mongoId.
     let guestId = user.mongoId;
     let finalGuestName = guestName || 'Guest';
-
-    // FIX 2: Check roles array properly (user.role does not exist)
     const isStaff = user.roles.includes('admin') || user.roles.includes('receptionist');
 
-    // If admin/receptionist is placing the order manually
     if (isStaff) {
       if (bodyGuestId) {
-        // Admin selected a registered user
         guestId = bodyGuestId;
-        // finalGuestName = guestName || 'Guest'; 
       } else if (guestName) {
-        // Admin entered a manual name (no registered user)
         guestId = undefined; 
         finalGuestName = guestName;
       }
     }
 
-    // FIX 3: Ensure we have a valid ID for placedBy
     if (!user.mongoId) {
         return res.status(400).json({ error: 'User profile not found.' });
     }
@@ -78,12 +71,44 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
       specialNotes,
       items: orderItems,
       totalAmount,
-      placedBy: user.mongoId, // FIX: Use correct property
+      placedBy: user.mongoId,
     });
     
+    // --- 🔔 NOTIFICATION TRIGGER ---
+    try {
+        const location = roomNumber ? `Room ${roomNumber}` : `Table ${tableNumber}`;
+        const message = `New Order for ${location}.\nItems: ${orderItems.length}\nTotal: $${totalAmount}`;
+
+        // 1. Notify Admin/Kitchen
+        await sendNotification({
+            type: 'ORDER',
+            title: 'New Kitchen Order',
+            message: message,
+            data: {
+                // ✅ Explicit conversion
+                orderId: (order._id as Types.ObjectId).toString(),
+                location: location
+            }
+        });
+
+        // 2. If it's a customer placing it, notify them via Email (optional)
+        if (!isStaff && user.email) {
+            sendNotification({
+                type: 'ORDER',
+                title: 'Order Received',
+                message: `Your order for ${location} has been received.`,
+                recipientEmail: user.email,
+                recipientPhone: user.phone,
+                data: { orderId: (order._id as Types.ObjectId).toString() }
+            }).catch(e => console.error("Email Error:", e));
+        }
+    } catch (notifErr) {
+        console.error("Failed to send order notification", notifErr);
+    }
+    // --- END NOTIFICATION ---
+
     res.status(201).json(order);
   } catch (err: any) {
-    // Return specific error message to frontend
     res.status(400).json({ error: err.message || 'Failed to place order' });
   }
 });
