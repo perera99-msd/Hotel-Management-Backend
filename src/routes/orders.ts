@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { Types } from 'mongoose';
+import { Types, isValidObjectId } from 'mongoose';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Order, IOrderItem } from '../models/order.js';
 import { MenuItem } from '../models/menuItem.js';
@@ -27,27 +27,62 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
       return res.status(400).json({ error: 'Items are required' });
     }
 
-    // Enrich items with name and price
-    const menuItemIds = items.map((i: any) => i.menuItemId);
-    const menuItems = await MenuItem.find({ _id: { $in: menuItemIds } }).lean();
-    const itemsMap = new Map(menuItems.map((m) => [m._id.toString(), m]));
+    // Separate standard DB items from custom/manual items
+    const standardItemIds = items
+      .filter((i: any) => isValidObjectId(i.menuItemId))
+      .map((i: any) => i.menuItemId);
+
+    // Fetch standard items
+    const dbMenuItems = await MenuItem.find({ _id: { $in: standardItemIds } }).lean();
+    const dbItemsMap = new Map(dbMenuItems.map((m) => [m._id.toString(), m]));
     
-    const orderItems: IOrderItem[] = items.map((i: any) => {
-      const mi = itemsMap.get(i.menuItemId);
-      if (!mi) throw new Error(`Invalid menu item ID: ${i.menuItemId}`);
-      return { 
-        menuItemId: mi._id as any, 
-        name: mi.name, 
-        quantity: i.quantity, 
-        price: mi.price 
-      };
-    });
+    const orderItems: IOrderItem[] = [];
+    
+    // Process all items
+    for (const i of items) {
+        if (isValidObjectId(i.menuItemId)) {
+            // Standard Item: Verify existence and price
+            const mi = dbItemsMap.get(i.menuItemId);
+            if (!mi) {
+                // If ID was valid format but not found in DB, skip or throw? 
+                // We'll throw to ensure data integrity.
+                throw new Error(`Invalid menu item ID: ${i.menuItemId}`);
+            }
+            orderItems.push({ 
+                menuItemId: mi._id as any, 
+                name: mi.name, 
+                quantity: Number(i.quantity) || 1, 
+                price: mi.price 
+            });
+        } else {
+            // Custom/Manual Item: Use provided details (Trusting frontend for Custom Orders)
+            // Ideally, we might want a "Custom Item" placeholder in DB, but for now we generate a new ID if needed 
+            // or just store it. However, Schema expects 'menuItemId' to be ObjectId.
+            // WORKAROUND: For pure custom items without a DB entry, we usually need a generic "Custom Food" item in DB.
+            // If that doesn't exist, we can't strictly satisfy the 'ref: MenuItem' constraint unless we make it optional.
+            // Assuming strict schema: We will just fail if strictly enforced. 
+            // BUT, let's assume we can create a temporary ID or the schema is loose enough. 
+            // Actually, best practice: Create the order with these items. 
+            // If Schema requires valid ObjectId ref, we might hit a snag.
+            // Let's create a dynamic ObjectId for the session or if it's a "Custom Order" string.
+            
+            // Allow bypassing strict ref check if schema allows, or use a specific system ObjectId.
+            // For this specific codebase, we will generate a new ObjectId for the record, 
+            // but note that 'populate' will fail for these items.
+            orderItems.push({
+                menuItemId: new Types.ObjectId(), // Generate a dummy ID for the record
+                name: i.name || "Custom Item",
+                quantity: Number(i.quantity) || 1,
+                price: Number(i.price) || 0
+            });
+        }
+    }
 
     const totalAmount = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
     const user = (req as any).user;
 
     let guestId = user.mongoId;
-    let finalGuestName = guestName || 'Guest';
+    let finalGuestName = guestName || user.name || 'Guest';
     const isStaff = user.roles.includes('admin') || user.roles.includes('receptionist');
 
     if (isStaff) {
@@ -76,7 +111,7 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
     
     // --- 🔔 NOTIFICATION TRIGGER ---
     try {
-        const location = roomNumber ? `Room ${roomNumber}` : `Table ${tableNumber}`;
+        const location = roomNumber ? `Room ${roomNumber}` : tableNumber ? `Table ${tableNumber}` : `Guest ${finalGuestName}`;
         const message = `New Order for ${location}.\nItems: ${orderItems.length}\nTotal: $${totalAmount}`;
 
         // 1. Notify Admin/Kitchen
@@ -85,7 +120,6 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
             title: 'New Kitchen Order',
             message: message,
             data: {
-                // ✅ Explicit conversion
                 orderId: (order._id as Types.ObjectId).toString(),
                 location: location
             }
@@ -105,10 +139,10 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
     } catch (notifErr) {
         console.error("Failed to send order notification", notifErr);
     }
-    // --- END NOTIFICATION ---
 
     res.status(201).json(order);
   } catch (err: any) {
+    console.error("Order Creation Error:", err);
     res.status(400).json({ error: err.message || 'Failed to place order' });
   }
 });

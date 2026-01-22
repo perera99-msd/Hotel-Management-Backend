@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { TripPackage } from '../models/tripPackage.js';
 import { TripRequest } from '../models/tripRequest.js';
-import { User } from '../models/user.js'; // Import User to validate guests
+import { User } from '../models/user.js'; 
 
 export const tripsRouter = Router();
 tripsRouter.use(authenticate());
@@ -59,10 +59,9 @@ tripsRouter.patch('/:id/status', requireRoles('admin', 'receptionist'), async (r
 // GET /requests - Admin: List all bookings
 tripsRouter.get('/requests', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
-    // Populate user details
     const requests = await TripRequest.find({})
       .populate('requestedBy', 'name email phone')
-      .populate('packageId', 'name')
+      .populate('packageId', 'name location')
       .sort({ createdAt: -1 })
       .lean();
     res.json(requests);
@@ -100,18 +99,48 @@ tripsRouter.post('/requests/admin', requireRoles('admin', 'receptionist'), async
   }
 });
 
-// POST /requests - Customer: Request Trip
+// POST /requests - Customer: Request Trip (Standard or Custom)
 tripsRouter.post('/requests', requireRoles('customer'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    // Basic implementation for customer request
-    const created = await TripRequest.create({ 
-        requestedBy: user.mongoId, 
-        details: req.body.details,
-        status: 'Requested'
-    });
+    const { packageId, tripDate, participants, details, location, guestInfo } = req.body;
+    
+    let bookingData: any = {
+        requestedBy: user.mongoId,
+        participants: participants || 1,
+        status: 'Requested',
+        details: details || '' // Can contain serialized JSON of custom details or guest info
+    };
+
+    if (packageId) {
+        // --- Standard Package Booking ---
+        const pkg = await TripPackage.findById(packageId);
+        if (!pkg) return res.status(404).json({ error: 'Package not found' });
+
+        bookingData.packageId = pkg._id;
+        bookingData.packageName = pkg.name;
+        bookingData.location = pkg.location;
+        bookingData.totalPrice = pkg.price * (participants || 1); // Estimated total
+        bookingData.tripDate = tripDate;
+        
+        // Append guest contact info to details if provided
+        if (guestInfo) {
+             const contactStr = `\n\nContact Info:\nName: ${guestInfo.fullName}\nPhone: ${guestInfo.phoneNumber}\nEmail: ${guestInfo.email}`;
+             bookingData.details += contactStr;
+        }
+
+    } else {
+        // --- Custom Trip Request ---
+        bookingData.packageName = "Custom Trip Request";
+        bookingData.location = location || "Custom Destination";
+        bookingData.tripDate = tripDate; 
+        // totalPrice is left undefined/0 until admin reviews
+    }
+
+    const created = await TripRequest.create(bookingData);
     res.status(201).json(created);
   } catch (err: any) {
+    console.error("Trip Request Error:", err);
     res.status(400).json({ error: err.message || 'Failed to create trip request' });
   }
 });

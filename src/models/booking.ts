@@ -1,7 +1,6 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
 export type BookingStatus = 'Pending' | 'Confirmed' | 'CheckedIn' | 'CheckedOut' | 'Cancelled';
-// ✅ Added 'Online' to Types
 export type BookingSource = 'Local' | 'Online' | 'Booking.com' | 'TripAdvisor' | 'Expedia'; 
 
 export interface IBooking extends Document {
@@ -12,6 +11,14 @@ export interface IBooking extends Document {
   status: BookingStatus;
   source: BookingSource;
   sourceBookingId?: string;
+  // ✅ Added missing fields
+  adults: number;
+  children: number;
+  preferences?: {
+    bedType?: string;
+    mealPlan?: string;
+    specialRequests?: string;
+  };
 }
 
 const BookingSchema = new Schema<IBooking>(
@@ -22,7 +29,6 @@ const BookingSchema = new Schema<IBooking>(
     checkOut: { type: Date, required: true },
     status: { type: String, enum: ['Pending', 'Confirmed', 'CheckedIn', 'CheckedOut', 'Cancelled'], default: 'Pending' },
     
-    // ✅ Added 'Online' to Enum
     source: { 
         type: String, 
         enum: ['Local', 'Online', 'Booking.com', 'TripAdvisor', 'Expedia'], 
@@ -31,6 +37,15 @@ const BookingSchema = new Schema<IBooking>(
     },
     
     sourceBookingId: { type: String, index: true },
+    
+    // ✅ Added new fields to Schema
+    adults: { type: Number, default: 1 },
+    children: { type: Number, default: 0 },
+    preferences: {
+        bedType: { type: String },
+        mealPlan: { type: String },
+        specialRequests: { type: String }
+    }
   },
   { timestamps: true }
 );

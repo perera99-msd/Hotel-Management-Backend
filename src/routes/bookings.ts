@@ -33,7 +33,18 @@ bookingsRouter.get('/', async (req: Request, res: Response) => {
 // --- POST: Create Booking ---
 bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), async (req: Request, res: Response) => {
   try {
-    const { roomId, checkIn, checkOut, guestId, source, status: requestedStatus } = req.body;
+    // ✅ Extract new fields from body
+    const { 
+        roomId, 
+        checkIn, 
+        checkOut, 
+        guestId, 
+        source, 
+        status: requestedStatus,
+        adults,
+        children,
+        preferences
+    } = req.body;
 
     console.log("📝 [Booking Attempt]", { roomId, guestId, checkIn, checkOut });
 
@@ -77,6 +88,10 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
       checkOut: end,
       status: finalStatus,
       source: source || 'Local',
+      // ✅ Save the new fields
+      adults: adults || 1,
+      children: children || 0,
+      preferences: preferences || {}
     }) as any;
 
     if (finalStatus === 'CheckedIn') {
@@ -85,7 +100,7 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
 
     console.log(`✅ [Booking Created] ID: ${newBooking._id}`);
 
-    // --- 🔔 NOTIFICATION TRIGGER (FIXED) ---
+    // --- 🔔 NOTIFICATION TRIGGER ---
     try {
         const guest = await User.findById(guestId);
         
@@ -94,7 +109,6 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
             
             console.log("🚀 [Notification] Starting sending process...");
 
-            // ⚠️ CRITICAL FIX: 'await' ensures this finishes before response is sent
             await sendNotification({
                 type: 'BOOKING',
                 title: 'New Booking Received',
@@ -102,7 +116,6 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
                 recipientEmail: guest.email,
                 recipientPhone: guest.phone, 
                 data: {
-                    // Explicitly convert to string to be safe
                     bookingId: newBooking._id.toString(),
                     roomId: roomId.toString(),
                     guestName: guest.name
@@ -114,7 +127,6 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
     } catch (notifErr: any) {
         console.error("❌ [Notification Failed]", notifErr.message);
     }
-    // --- END NOTIFICATION ---
 
     res.status(201).json(newBooking);
 
@@ -124,7 +136,6 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
   }
 });
 
-// ... (Keep existing PUT/DELETE/CheckIn routes unchanged) ...
 // --- PUT: Update Booking ---
 bookingsRouter.put('/:id', requireRoles('admin', 'receptionist', 'manager'), async (req: Request, res: Response) => {
     try {
