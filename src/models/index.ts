@@ -8,6 +8,7 @@ export * from './tripPackage.js';
 export * from './tripRequest.js';
 export * from './invoice.js';
 export * from './auditLog.js';
+export * from './revenue.js';
 
 
 

@@ -24,12 +24,17 @@ const transporter = nodemailer.createTransport({
 });
 
 interface NotificationPayload {
-  type: 'BOOKING' | 'ORDER' | 'SYSTEM';
+  type: 'BOOKING' | 'ORDER' | 'SYSTEM' | 'TRIP';
   title: string;
   message: string;
   recipientEmail?: string;
   recipientPhone?: string; // Expects 07XXXXXXXX or 947XXXXXXXX
-  data?: any; 
+  data?: any;
+  targetRoles?: string[]; // Roles that should see this in the dashboard
+  targetUserId?: string;   // Specific user (customer) that should see this
+  userId?: string;         // ✅ NEW: User ID for Firestore security rules
+  persistToDashboard?: boolean; // When false, only email/SMS is sent
+  notifyAdmin?: boolean;   // When false, skip the admin email fan-out
 }
 
 // ✅ HELPER: Sanitize MongoDB Data (Prevents "Circular Structure" or ObjectId errors)
@@ -55,20 +60,30 @@ export const sendNotification = async (payload: NotificationPayload) => {
   // Use Promise.allSettled so one failure doesn't stop the others
   const tasks = [];
 
+  const targetRoles = payload.targetRoles?.length
+    ? payload.targetRoles
+    : ['admin', 'receptionist', 'manager'];
+
+  const shouldPersist = payload.persistToDashboard !== false;
+
   console.log(`[Notification] Processing: ${payload.title}`);
 
   // 1. 🔔 Internal Dashboard Notification (Firestore)
-  tasks.push(
-    db.collection('notifications').add({
-      type: payload.type,
-      title: payload.title,
-      message: payload.message,
-      data: sanitizeData(payload.data),
-      read: false,
-      createdAt: new Date(),
-      targetRoles: ['admin', 'receptionist', 'manager'],
-    }).then(() => console.log('✅ Firestore Notification Saved'))
-  );
+  if (shouldPersist) {
+    tasks.push(
+      db.collection('notifications').add({
+        type: payload.type,
+        title: payload.title,
+        message: payload.message,
+        data: sanitizeData(payload.data),
+        read: false,
+        createdAt: new Date(),
+        targetRoles,
+        targetUserId: payload.targetUserId || null,
+        userId: payload.userId || null,  // ✅ NEW: Required for Firestore rules
+      }).then(() => console.log('✅ Firestore Notification Saved'))
+    );
+  }
 
   // 2. 📱 SMS via Text.lk
   if (payload.recipientPhone && TEXT_LK_API_KEY) {
@@ -90,7 +105,7 @@ export const sendNotification = async (payload: NotificationPayload) => {
 
   // 4. 🚨 Admin Alert (Email only, to save SMS costs)
   // We check if the recipient is NOT the admin to avoid double emailing
-  if (ADMIN_EMAIL && process.env.SMTP_USER && payload.recipientEmail !== ADMIN_EMAIL) {
+  if (ADMIN_EMAIL && process.env.SMTP_USER && payload.recipientEmail !== ADMIN_EMAIL && payload.notifyAdmin !== false) {
     tasks.push(
       sendEmail(ADMIN_EMAIL, `[ADMIN] ${payload.title}`, payload.message)
         .then(() => console.log('✅ Admin Email Sent'))

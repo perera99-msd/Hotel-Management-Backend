@@ -3,15 +3,27 @@ import { Types, isValidObjectId } from 'mongoose';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Order, IOrderItem } from '../models/order.js';
 import { MenuItem } from '../models/menuItem.js';
+import { Booking } from '../models/booking.js';
+import { Room } from '../models/room.js';
+import { Invoice } from '../models/invoice.js';
 import { sendNotification } from '../services/notificationService.js';
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate());
 
 // GET /api/orders
-ordersRouter.get('/', requireRoles('admin', 'receptionist', 'kitchen'), async (_req: Request, res: Response) => {
+ordersRouter.get('/', requireRoles('admin', 'receptionist', 'kitchen', 'customer'), async (req: Request, res: Response) => {
   try {
-    const orders = await Order.find().sort({ createdAt: -1 });
+    const user = (req as any).user;
+    const isCustomerOnly = user.roles.length === 1 && user.roles.includes('customer');
+
+    const query: any = {};
+    if (isCustomerOnly) {
+      // Limit to orders for this user's bookings
+      query.guestId = user.mongoId;
+    }
+
+    const orders = await Order.find(query).sort({ createdAt: -1 });
     res.json(orders);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch orders' });
@@ -21,10 +33,38 @@ ordersRouter.get('/', requireRoles('admin', 'receptionist', 'kitchen'), async (_
 // POST /api/orders
 ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async (req: Request, res: Response) => {
   try {
-    const { items, roomNumber, tableNumber, specialNotes, guestName, guestId: bodyGuestId } = req.body;
+    const { items, roomNumber, tableNumber, specialNotes, guestName, guestId: bodyGuestId, bookingId } = req.body;
     
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Items are required' });
+    }
+
+    // Booking validation
+    if (!bookingId || !isValidObjectId(bookingId)) {
+      return res.status(400).json({ error: 'bookingId is required and must be a valid id' });
+    }
+
+    const booking = await Booking.findById(bookingId).populate('guestId');
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    const bookingStatus = booking.status;
+    const isCheckedIn = bookingStatus === 'CheckedIn';
+    const isStaff = (req as any).user.roles.includes('admin') || (req as any).user.roles.includes('receptionist');
+
+    // Enforce orders only when booking is checked-in for all roles
+    if (!isCheckedIn) {
+      return res.status(400).json({ error: 'Orders can be placed only after the booking is checked-in.' });
+    }
+
+    // Customers can order only for their own booking
+    const user = (req as any).user;
+    if (!isStaff && booking.guestId) {
+      const guestId = (booking.guestId as any)?._id || booking.guestId;
+      if (guestId.toString() !== user.mongoId) {
+        return res.status(403).json({ error: 'You can only order for your own checked-in booking.' });
+      }
     }
 
     // Separate standard DB items from custom/manual items
@@ -79,29 +119,29 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
     }
 
     const totalAmount = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
-    const user = (req as any).user;
+    let guestId = booking.guestId as any;
+    let finalGuestName = (booking.guestId as any)?.name || guestName || user.name || 'Guest';
 
-    let guestId = user.mongoId;
-    let finalGuestName = guestName || user.name || 'Guest';
-    const isStaff = user.roles.includes('admin') || user.roles.includes('receptionist');
-
-    if (isStaff) {
-      if (bodyGuestId) {
-        guestId = bodyGuestId;
-      } else if (guestName) {
-        guestId = undefined; 
-        finalGuestName = guestName;
-      }
+    if (isStaff && bodyGuestId) {
+      guestId = bodyGuestId;
     }
 
     if (!user.mongoId) {
         return res.status(400).json({ error: 'User profile not found.' });
     }
 
+    // Try to pick room number from booking if not provided
+    let resolvedRoomNumber = roomNumber;
+    if (!resolvedRoomNumber && booking.roomId) {
+      const roomDoc = await Room.findById(booking.roomId).lean();
+      resolvedRoomNumber = roomDoc?.roomNumber;
+    }
+
     const order = await Order.create({
+      bookingId,
       guestId,
       guestName: finalGuestName,
-      roomNumber,
+      roomNumber: resolvedRoomNumber,
       tableNumber,
       specialNotes,
       items: orderItems,
@@ -111,33 +151,66 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
     
     // --- 🔔 NOTIFICATION TRIGGER ---
     try {
-        const location = roomNumber ? `Room ${roomNumber}` : tableNumber ? `Table ${tableNumber}` : `Guest ${finalGuestName}`;
-        const message = `New Order for ${location}.\nItems: ${orderItems.length}\nTotal: $${totalAmount}`;
+      const location = roomNumber ? `Room ${roomNumber}` : tableNumber ? `Table ${tableNumber}` : `Guest ${finalGuestName}`;
+      const guestEmail = (booking.guestId as any)?.email || user.email;
+      const guestPhone = (booking.guestId as any)?.phone || (user as any).phone;
+      const itemSummary = orderItems.map((i) => `${i.quantity} x ${i.name}`).join(', ');
 
-        // 1. Notify Admin/Kitchen
-        await sendNotification({
-            type: 'ORDER',
-            title: 'New Kitchen Order',
-            message: message,
-            data: {
-                orderId: (order._id as Types.ObjectId).toString(),
-                location: location
-            }
-        });
+      const staffMessage = `New order placed for ${location}.\nItems: ${itemSummary || 'See order'}\nTotal: $${totalAmount.toFixed(2)}`;
 
-        // 2. If it's a customer placing it, notify them via Email (optional)
-        if (!isStaff && user.email) {
-            sendNotification({
-                type: 'ORDER',
-                title: 'Order Received',
-                message: `Your order for ${location} has been received.`,
-                recipientEmail: user.email,
-                recipientPhone: user.phone,
-                data: { orderId: (order._id as Types.ObjectId).toString() }
-            }).catch(e => console.error("Email Error:", e));
+      // 1. Notify Admin/Kitchen/Reception via dashboard
+      await sendNotification({
+        type: 'ORDER',
+        title: 'New Kitchen Order',
+        message: staffMessage,
+        targetRoles: ['admin', 'receptionist', 'manager', 'kitchen'],
+        data: {
+          orderId: (order._id as Types.ObjectId).toString(),
+          location: location
         }
+      });
+
+      // 2. Notify customer via email/SMS and dashboard (no staff duplication)
+      if (!isStaff && guestEmail) {
+        await sendNotification({
+          type: 'ORDER',
+          title: 'We received your order',
+          message: `Hi ${finalGuestName}, we received your dining order for ${location}.\nItems: ${itemSummary || 'See order details'}.\nTotal: $${totalAmount.toFixed(2)}. We will let you know once it is ready.`,
+        recipientEmail: guestEmail,
+        recipientPhone: guestPhone,
+          targetRoles: ['customer'],
+          targetUserId: user.mongoId,
+          notifyAdmin: false,
+          data: { orderId: (order._id as Types.ObjectId).toString(), status: 'Preparing' }
+        });
+      }
     } catch (notifErr) {
         console.error("Failed to send order notification", notifErr);
+    }
+
+    // Auto-add to existing invoice if it exists and is not paid
+    try {
+      const invoice = await Invoice.findOne({ bookingId, status: { $ne: 'paid' } });
+      if (invoice) {
+        invoice.lineItems.push({
+          description: `Order ${(order._id as any).toString().slice(-6)}`,
+          qty: 1,
+          amount: totalAmount,
+          category: 'meal',
+          source: 'order',
+          refId: order._id as any
+        });
+        
+        // Recalculate totals
+        const subtotal = invoice.lineItems.reduce((sum: number, item: any) => sum + (item.amount || 0), 0);
+        invoice.subtotal = subtotal;
+        invoice.tax = subtotal * 0.10;
+        invoice.total = subtotal + invoice.tax;
+        
+        await invoice.save();
+      }
+    } catch (invoiceErr) {
+      console.error('Failed to update invoice with new order:', invoiceErr);
     }
 
     res.status(201).json(order);
@@ -153,6 +226,24 @@ ordersRouter.patch('/:id/status', requireRoles('kitchen', 'receptionist', 'admin
     const { status } = req.body;
     const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
     if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    // Notify customer when order is ready (in-app only)
+    if (status === 'Ready' && order.guestId) {
+      try {
+        const location = order.roomNumber ? `Room ${order.roomNumber}` : order.tableNumber ? `Table ${order.tableNumber}` : 'your room';
+        await sendNotification({
+          type: 'ORDER',
+          title: 'Order ready',
+          message: `Hi ${order.guestName || 'guest'}, your order for ${location} is ready and will be served shortly.`,
+          targetRoles: ['customer'],
+          targetUserId: (order.guestId as Types.ObjectId).toString(),
+          notifyAdmin: false,
+          data: { orderId: (order as any)._id.toString(), status: order.status },
+        });
+      } catch (notifyErr) {
+        console.error('Failed to send order ready notification', notifyErr);
+      }
+    }
     res.json(order);
   } catch (err) {
     res.status(400).json({ error: 'Failed to update order status' });

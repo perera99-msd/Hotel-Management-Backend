@@ -4,7 +4,9 @@ export interface IInvoiceLineItem {
   description: string;
   qty: number;
   amount: number;
-  category?: "room" | "meal" | "service" | "other";
+  category?: "room" | "meal" | "service" | "other" | "discount";
+  source?: "booking" | "order" | "trip" | "custom" | "discount";
+  refId?: Types.ObjectId;
 }
 
 export interface IInvoice extends Document {
@@ -24,7 +26,9 @@ const InvoiceLineItemSchema = new Schema<IInvoiceLineItem>({
   description: { type: String, required: true },
   qty: { type: Number, required: true },
   amount: { type: Number, required: true }, // Total amount for this line
-  category: { type: String, default: 'other' }
+  category: { type: String, default: 'other' },
+  source: { type: String, default: 'custom' },
+  refId: { type: Schema.Types.ObjectId }
 });
 
 const InvoiceSchema = new Schema<IInvoice>(

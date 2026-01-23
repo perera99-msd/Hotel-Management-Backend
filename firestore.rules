@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Allow authenticated users to read all notifications (no filtering at rules level)
+    // Filtering is done client-side by targetRoles and targetUserId
+    match /notifications/{notificationId} {
+      // Read: authenticated users can read any notification
+      // (client-side filtering handles role/user targeting)
+      allow read: if request.auth != null;
+      
+      // Create: only backend/admin can create via Firebase Admin SDK
+      // (This is handled server-side; client writes are blocked)
+      allow create: if false;
+      
+      // Update: authenticated users can mark as read (only 'read' field)
+      allow update: if request.auth != null && 
+                      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      
+      // Delete: authenticated users can delete notifications targeting them
+      // or notifications they have permission to access
+      allow delete: if request.auth != null && (
+        request.auth.uid == resource.data.targetUserId ||
+        request.auth.token.firebase.sign_in_provider != null
+      );
+    }
+
+    // Additional collections for other features (if needed)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -3,6 +3,7 @@ import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 export type TripRequestStatus = 'Requested' | 'Pending' | 'Confirmed' | 'Completed' | 'Cancelled' | 'Reviewed' | 'Approved' | 'Rejected';
 
 export interface ITripRequest extends Document {
+  bookingId: Types.ObjectId;
   requestedBy: Types.ObjectId;
   packageId?: Types.ObjectId; // Link to specific package if applicable
   packageName?: string;       // Snapshot of name in case package is deleted
@@ -17,6 +18,7 @@ export interface ITripRequest extends Document {
 
 const TripRequestSchema = new Schema<ITripRequest>(
   {
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking', required: true, index: true },
     requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     packageId: { type: Schema.Types.ObjectId, ref: 'TripPackage' },
     packageName: { type: String },

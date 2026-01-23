@@ -11,6 +11,7 @@ export interface IOrderItem {
 }
 
 export interface IOrder extends Document {
+  bookingId: Types.ObjectId;
   guestId?: Types.ObjectId; // Optional for manual orders
   guestName?: string;       // For manual orders
   roomNumber?: string;
@@ -31,6 +32,7 @@ const OrderItemSchema = new Schema<IOrderItem>({
 
 const OrderSchema = new Schema<IOrder>(
   {
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking', required: true, index: true },
     guestId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     guestName: { type: String },
     roomNumber: { type: String },

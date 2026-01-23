@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { User } from '../models/user.js';
+import { Booking } from '../models/booking.js';
+import { Order } from '../models/order.js';
+import { TripRequest } from '../models/tripRequest.js';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { logger } from '../lib/logger.js';
 import admin from '../lib/firebaseAdmin.js'; 
@@ -240,5 +243,52 @@ userRouter.delete('/:id', requireRoles('admin'), async (req: Request, res: Respo
     res.json({ message: 'User deleted' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+/**
+ * GET /api/users/dashboard
+ * Customer gets their ongoing bookings, orders, and trip packages
+ */
+userRouter.get('/dashboard', authenticate(), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    
+    // Get ongoing bookings (Confirmed or CheckedIn)
+    const bookings = await Booking.find({ 
+      guestId: user.mongoId,
+      status: { $in: ['Confirmed', 'CheckedIn'] }
+    })
+      .populate('roomId')
+      .sort({ checkIn: 1 })
+      .lean();
+    
+    // Get all orders for user's bookings
+    const orders = await Order.find({ 
+      guestId: user.mongoId,
+      status: { $ne: 'Cancelled' }
+    })
+      .populate('bookingId', 'checkIn checkOut roomId')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    // Get all trip requests for user's bookings
+    const tripRequests = await TripRequest.find({ 
+      requestedBy: user.mongoId,
+      status: { $nin: ['Cancelled', 'Rejected', 'Completed'] }
+    })
+      .populate('packageId', 'name location price')
+      .populate('bookingId', 'checkIn checkOut')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    res.json({
+      bookings,
+      orders,
+      tripRequests
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to fetch customer dashboard');
+    res.status(500).json({ error: 'Failed to fetch dashboard data' });
   }
 });

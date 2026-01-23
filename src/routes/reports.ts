@@ -6,6 +6,7 @@ import { Order } from '../models/order.js';
 import { Invoice } from '../models/invoice.js';
 import { InventoryItem } from '../models/inventoryItem.js';
 import { Deal } from '../models/deal.js';
+import { TripRequest } from '../models/tripRequest.js';
 import dayjs from 'dayjs';
 
 export const reportsRouter = Router();
@@ -53,73 +54,78 @@ reportsRouter.get('/sidebar-counts', requireRoles('admin', 'receptionist', 'mana
  */
 reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist'), async (_req: Request, res: Response) => {
   try {
-    const todayStart = dayjs().startOf('day').toDate();
-    const todayEnd = dayjs().endOf('day').toDate();
+    const today = dayjs();
+    const todayStart = today.startOf('day').toDate();
+    const todayEnd = today.endOf('day').toDate();
 
-    // 1. Fetch Metrics (Parallel)
+    const sixMonthsAgo = today.subtract(5, 'month').startOf('month').toDate();
+
     const [
       todayCheckIns,
       todayCheckOuts,
       rooms,
-      deals
+      deals,
+      activeBookings,
+      bookingsForStats,
+      recentBookings,
+      recentOrders,
+      recentTrips
     ] = await Promise.all([
       Booking.countDocuments({ checkIn: { $gte: todayStart, $lte: todayEnd }, status: { $in: ['Confirmed', 'CheckedIn'] } }),
       Booking.countDocuments({ checkOut: { $gte: todayStart, $lte: todayEnd }, status: { $in: ['CheckedIn', 'CheckedOut'] } }),
-      Room.find().lean(), 
-      Deal.find({ status: 'Ongoing' }).lean()
+      Room.find().lean(),
+      Deal.find({ status: 'Ongoing' }).lean(),
+      Booking.find({ status: { $in: ['Confirmed', 'CheckedIn'] }, checkIn: { $lte: todayEnd }, checkOut: { $gte: todayStart } })
+        .populate('roomId', 'roomNumber rate')
+        .populate('guestId', 'name')
+        .lean(),
+      Booking.find({ status: { $in: ['Confirmed', 'CheckedIn', 'CheckedOut'] }, checkOut: { $gte: sixMonthsAgo } })
+        .populate('roomId', 'rate')
+        .lean(),
+      Booking.find().sort({ createdAt: -1 }).limit(5).populate('roomId', 'roomNumber').populate('guestId', 'name').lean(),
+      Order.find().sort({ createdAt: -1 }).limit(5).lean(),
+      TripRequest.find().sort({ createdAt: -1 }).limit(5).lean(),
     ]);
 
-    // 2. Process Room Metrics
-    let totalAvailable = 0;
-    let totalOccupied = 0;
-    let statusBreakdown = {
-      occupied: { clean: 0, dirty: 0, inspected: 0 },
-      available: { clean: 0, dirty: 0, inspected: 0 }
+    // Room metrics
+    const totalRooms = rooms.length;
+    const availableCount = rooms.filter((r) => r.status === 'Available').length;
+    const occupiedCount = rooms.filter((r) => r.status === 'Occupied').length;
+    const cleaningCount = rooms.filter((r) => r.status === 'Cleaning').length;
+    const maintenanceCount = rooms.filter((r) => r.status === 'Maintenance').length;
+    const reservedCount = rooms.filter((r) => r.status === 'Reserved').length;
+
+    const statusBreakdown = {
+      occupied: { clean: occupiedCount, dirty: 0, inspected: 0 },
+      available: { clean: availableCount, dirty: cleaningCount, inspected: maintenanceCount + reservedCount },
     };
 
-    rooms.forEach(r => {
-      if (r.status === 'Occupied') {
-        totalOccupied++;
-        statusBreakdown.occupied.clean++; 
-      } else if (r.status === 'Available') {
-        totalAvailable++;
-        statusBreakdown.available.clean++;
-      } else if (r.status === 'Cleaning') {
-        statusBreakdown.available.dirty++; 
-      } else if (r.status === 'Maintenance') {
-        statusBreakdown.available.inspected++; 
-      }
-    });
-
-    const totalRooms = rooms.length;
-    const floorCompletion = totalRooms > 0 
-      ? Math.round(((totalAvailable + totalOccupied) / totalRooms) * 100) 
+    const floorCompletion = totalRooms > 0
+      ? Math.round(((totalRooms - cleaningCount - maintenanceCount) / totalRooms) * 100)
       : 100;
 
-    // 3. Process Room Types Data
+    // Room type metrics + deal overlays
     const roomTypesMap = new Map();
-    
-    rooms.forEach(r => {
+    rooms.forEach((r) => {
       if (!roomTypesMap.has(r.type)) {
-        roomTypesMap.set(r.type, { 
-          type: r.type, 
-          deals: 0, 
-          current: 0, 
-          total: 0, 
-          rate: r.rate 
+        roomTypesMap.set(r.type, {
+          type: r.type,
+          deals: 0,
+          current: 0,
+          total: 0,
+          rate: r.rate,
         });
       }
       const entry = roomTypesMap.get(r.type);
-      entry.total++;
-      if (r.status === 'Occupied') entry.current++;
+      entry.total += 1;
+      if (r.status === 'Occupied') entry.current += 1;
     });
 
-    // Map Active Deals to Room Types
-    deals.forEach(d => {
+    deals.forEach((d) => {
       d.roomType.forEach((rtype: string) => {
-        for (let [key, val] of roomTypesMap) {
+        for (const [key, val] of roomTypesMap) {
           if (key.toLowerCase().includes(rtype.toLowerCase()) || rtype.toLowerCase().includes(key.toLowerCase())) {
-            val.deals++;
+            val.deals += 1;
           }
         }
       });
@@ -127,45 +133,92 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
 
     const roomTypesData = Array.from(roomTypesMap.values());
 
-    // 4. Mock/Generate Occupancy Trend (Kept for dashboard overview widget)
-    const occupancyData = [
-      { name: "Jan", percentage: 65 }, { name: "Feb", percentage: 70 },
-      { name: "Mar", percentage: 75 }, { name: "Apr", percentage: 60 },
-      { name: "May", percentage: 80 }, { name: "Jun", percentage: 85 },
-      { name: "Jul", percentage: 90 }, { name: "Aug", percentage: 95 },
-      { name: "Sep", percentage: 70 }, { name: "Oct", percentage: 75 },
-      { name: "Nov", percentage: 85 }, { name: "Dec", percentage: 90 },
-    ];
+    // Occupancy trend (last 6 months)
+    const occupancyData: { name: string; percentage: number }[] = [];
+    const totalRoomsCount = Math.max(totalRooms, 1);
 
-    // 5. Mock Feedback (Since no Feedback model exists yet)
-    const feedback = [
-      { guest: "Mark", comment: "Food could be better.", room: "A201" },
-      { guest: "Christian", comment: "Facilities are not enough for amount paid.", room: "A101" },
-      { guest: "Alexander", comment: "Room cleaning could be better.", room: "A301" },
-    ];
+    for (let i = 5; i >= 0; i--) {
+      const month = today.subtract(i, 'month');
+      const monthStart = month.startOf('month');
+      const monthEnd = month.endOf('month');
+      const capacity = totalRoomsCount * month.daysInMonth();
+      let occupiedNights = 0;
+
+      bookingsForStats.forEach((b: any) => {
+        const start = dayjs(b.checkIn);
+        const end = dayjs(b.checkOut);
+        const effectiveStart = start.isAfter(monthStart) ? start : monthStart;
+        const effectiveEnd = end.isBefore(monthEnd) ? end : monthEnd;
+        if (effectiveEnd.isAfter(effectiveStart)) {
+          const nights = effectiveEnd.diff(effectiveStart, 'day') || 1;
+          occupiedNights += nights;
+        }
+      });
+
+      occupancyData.push({
+        name: month.format('MMM'),
+        percentage: capacity ? Math.min(100, Math.round((occupiedNights / capacity) * 100)) : 0,
+      });
+    }
+
+    // Active guest count (adults + children where present)
+    const totalGuests = activeBookings.reduce((sum: number, b: any) => {
+      const adults = typeof b.adults === 'number' ? b.adults : 1;
+      const kids = typeof b.children === 'number' ? b.children : 0;
+      return sum + adults + kids;
+    }, 0);
+
+    // Recent activity timeline
+    const recentActivity = [
+      ...recentBookings.map((b: any) => ({
+        id: `booking-${b._id.toString()}`,
+        type: b.status === 'CheckedIn' ? 'checkin' : b.status === 'CheckedOut' ? 'checkout' : 'booking',
+        description: `${b.guestId?.name || 'Guest'} ${b.status === 'CheckedIn' ? 'checked in' : 'made a booking'}`,
+        room: (b.roomId as any)?.roomNumber,
+        createdAt: b.createdAt || new Date(),
+      })),
+      ...recentOrders.map((o: any) => ({
+        id: `order-${o._id.toString()}`,
+        type: o.status === 'Ready' ? 'order-ready' : 'order',
+        description: `Order ${o.status === 'Ready' ? 'ready' : 'placed'} ${o.roomNumber ? `for room ${o.roomNumber}` : ''}`.trim(),
+        room: o.roomNumber,
+        createdAt: o.createdAt || new Date(),
+      })),
+      ...recentTrips.map((t: any) => ({
+        id: `trip-${t._id.toString()}`,
+        type: 'trip',
+        description: `Trip ${t.status?.toLowerCase() || 'update'} - ${t.packageName || t.location || 'Custom trip'}`,
+        room: undefined,
+        createdAt: t.createdAt || new Date(),
+      })),
+    ]
+      .sort((a, b) => dayjs(b.createdAt).valueOf() - dayjs(a.createdAt).valueOf())
+      .slice(0, 10)
+      .map((item) => ({ ...item, time: dayjs(item.createdAt).toISOString() }));
 
     res.json({
       metrics: {
         todayCheckIns,
         todayCheckOuts,
-        totalInHotel: totalOccupied * 2, 
-        totalAvailableRoom: totalAvailable,
-        totalOccupiedRoom: totalOccupied
+        totalInHotel: totalGuests || occupiedCount,
+        totalAvailableRoom: availableCount,
+        totalOccupiedRoom: occupiedCount,
       },
       roomTypes: roomTypesData,
       roomStatus: {
-        occupied: { occupied: totalOccupied, ...statusBreakdown.occupied },
-        available: { occupied: totalAvailable + statusBreakdown.available.dirty, ...statusBreakdown.available }
+        occupied: { occupied: occupiedCount, ...statusBreakdown.occupied },
+        available: { occupied: availableCount, ...statusBreakdown.available },
       },
       floorStatus: {
         percentage: floorCompletion,
         status: [
-            { name: "Completed", color: "text-blue-500", done: true },
-            { name: "Yet to Complete", color: "text-gray-400", done: false },
-        ]
+          { name: 'Completed', color: 'text-blue-500', done: true },
+          { name: 'Yet to Complete', color: 'text-gray-400', done: false },
+        ],
       },
       occupancyData,
-      feedback
+      feedback: [],
+      recentActivity,
     });
 
   } catch (err) {
