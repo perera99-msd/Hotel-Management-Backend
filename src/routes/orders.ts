@@ -16,11 +16,17 @@ ordersRouter.get('/', requireRoles('admin', 'receptionist', 'kitchen', 'customer
   try {
     const user = (req as any).user;
     const isCustomerOnly = user.roles.length === 1 && user.roles.includes('customer');
+    const isStaff = user.roles.some((r: string) => ['admin', 'receptionist', 'kitchen', 'manager'].includes(r));
 
     const query: any = {};
     if (isCustomerOnly) {
       // Limit to orders for this user's bookings
       query.guestId = user.mongoId;
+    }
+    
+    // For staff, exclude 'Served' orders from the active view (admin dining section)
+    if (isStaff) {
+      query.status = { $nin: ['Served', 'Cancelled'] };
     }
 
     const orders = await Order.find(query).sort({ createdAt: -1 });

@@ -1,11 +1,20 @@
 /* */
 import { Router, Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Deal } from '../models/deal.js';
 
 export const dealsRouter = Router();
 
 dealsRouter.use(authenticate());
+
+const normalizeIds = (value: any) => {
+  const arr = Array.isArray(value) ? value : value ? [value] : [];
+  return arr
+    .filter(Boolean)
+    .filter((id: string) => mongoose.Types.ObjectId.isValid(id))
+    .map((id: string) => new mongoose.Types.ObjectId(id));
+};
 
 // GET /api/deals
 dealsRouter.get('/', async (req: Request, res: Response) => {
@@ -15,9 +24,11 @@ dealsRouter.get('/', async (req: Request, res: Response) => {
         id: d._id,
         referenceNumber: d.referenceNumber,
         dealName: d.dealName,
-        reservationsLeft: d.reservationsLeft,
+
         endDate: d.endDate,
-        roomType: d.roomType.join(', '),
+      roomType: d.roomType.join(', '),
+      roomTypeRaw: d.roomType,
+      roomIds: (d as any).roomIds?.map((r: any) => r.toString()) || [],
         status: d.status,
         price: d.price,
         description: d.description,
@@ -34,15 +45,29 @@ dealsRouter.get('/', async (req: Request, res: Response) => {
 // POST /api/deals
 dealsRouter.post('/', requireRoles('admin', 'manager'), async (req: Request, res: Response) => {
   try {
-    const { referenceNumber } = req.body;
+    const { referenceNumber, roomIds } = req.body;
+    
+    // Validate required fields
+    if (!roomIds || !Array.isArray(roomIds) || roomIds.length === 0) {
+      return res.status(400).json({ error: 'At least one room must be selected for the deal' });
+    }
+    
     const existing = await Deal.findOne({ referenceNumber });
     if (existing) return res.status(400).json({ error: 'Reference number already exists' });
 
+    const normalizedRoomIds = normalizeIds(roomIds);
+    if (normalizedRoomIds.length === 0) {
+      return res.status(400).json({ error: 'Invalid room IDs provided' });
+    }
+
+    const roomType = Array.isArray(req.body.roomTypes) ? req.body.roomTypes : req.body.roomType;
+
     const newDeal = await Deal.create({
       ...req.body,
-      roomType: req.body.roomTypes, // Map UI 'roomTypes' to DB 'roomType'
+      roomType,
+      roomIds: normalizedRoomIds,
       status: req.body.status || 'New',
-      reservationsLeft: req.body.reservationsLeft || 50
+      price: req.body.price || 0 // Price is optional, discount is primary
     });
     res.status(201).json(newDeal);
   } catch (err: any) {
@@ -53,13 +78,16 @@ dealsRouter.post('/', requireRoles('admin', 'manager'), async (req: Request, res
 // PUT /api/deals/:id
 dealsRouter.put('/:id', requireRoles('admin', 'manager'), async (req: Request, res: Response) => {
   try {
-    const updateData = req.body;
+    const updateData: any = { ...req.body };
     if (typeof updateData.roomType === 'string') {
         updateData.roomType = updateData.roomType.split(',').map((s: string) => s.trim());
     }
+    if (updateData.roomIds) {
+      updateData.roomIds = normalizeIds(updateData.roomIds);
+    }
     const updatedDeal = await Deal.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!updatedDeal) return res.status(404).json({ error: 'Deal not found' });
-    res.json({ ...updatedDeal.toObject(), id: updatedDeal._id, roomType: updatedDeal.roomType.join(', ') });
+    res.json({ ...updatedDeal.toObject(), id: updatedDeal._id, roomType: updatedDeal.roomType.join(', '), roomIds: (updatedDeal as any).roomIds?.map((r: any) => r.toString()) || [] });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update deal' });
   }

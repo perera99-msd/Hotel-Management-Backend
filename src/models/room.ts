@@ -8,6 +8,7 @@ export interface IRoom extends Document {
   roomNumber: string; // Changed to String to support "101A" etc.
   type: RoomType;
   rate: number;
+  monthlyRates: number[]; // 12 monthly rates (Jan-Dec)
   amenities: string[];
   status: RoomStatus;
   floor: number;        // ✅ Added
@@ -19,6 +20,12 @@ const RoomSchema = new Schema<IRoom>(
     roomNumber: { type: String, required: true, unique: true, index: true },
     type: { type: String, enum: ['single', 'double', 'suite', 'family'], required: true },
     rate: { type: Number, required: true },
+    monthlyRates: { 
+      type: [Number], 
+      default: function(this: any) { 
+        return Array(12).fill(this.rate || 0); 
+      }
+    },
     amenities: { type: [String], default: [] },
     status: { 
       type: String, 

@@ -230,42 +230,77 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
 /**
  * GET /api/reports/analytics
  * Returns all data needed for the Reports Dashboard
+ * Supports query parameter: ?period=daily|weekly|monthly|yearly
  */
-reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_req: Request, res: Response) => {
+reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
   try {
     const today = dayjs();
-    const sixMonthsAgo = today.subtract(5, 'month').startOf('month');
+    const period = (req.query.period as string) || 'monthly';
+    
+    let timeRangeStart: dayjs.Dayjs;
+    let iterationUnit: 'day' | 'week' | 'month' | 'year';
+    let labelFormat: string;
+    let iterations: number;
+
+    // Determine time range based on period
+    switch (period) {
+      case 'daily':
+        timeRangeStart = today.subtract(6, 'day');
+        iterationUnit = 'day';
+        labelFormat = 'ddd';
+        iterations = 7;
+        break;
+      case 'weekly':
+        timeRangeStart = today.subtract(3, 'week');
+        iterationUnit = 'week';
+        labelFormat = 'MMM DD';
+        iterations = 4;
+        break;
+      case 'yearly':
+        timeRangeStart = today.subtract(1, 'year');
+        iterationUnit = 'year';
+        labelFormat = 'YYYY';
+        iterations = 2;
+        break;
+      case 'monthly':
+      default:
+        timeRangeStart = today.subtract(5, 'month').startOf('month');
+        iterationUnit = 'month';
+        labelFormat = 'MMM';
+        iterations = 6;
+        break;
+    }
 
     const rooms = await Room.find().lean();
     const totalRoomsCount = rooms.length;
     const roomMap = new Map(rooms.map(r => [r._id.toString(), r]));
     
-    // Fetch bookings that overlap with the 6-month window
+    // Fetch bookings that overlap with the time window
     const bookings = await Booking.find({
       $or: [
-        { checkIn: { $gte: sixMonthsAgo.toDate() } },
-        { checkOut: { $gte: sixMonthsAgo.toDate() } },
+        { checkIn: { $gte: timeRangeStart.toDate() } },
+        { checkOut: { $gte: timeRangeStart.toDate() } },
         // Also catch bookings that span across the entire window
-        { checkIn: { $lte: sixMonthsAgo.toDate() }, checkOut: { $gte: today.toDate() } }
+        { checkIn: { $lte: timeRangeStart.toDate() }, checkOut: { $gte: today.toDate() } }
       ],
       status: { $in: ['Confirmed', 'CheckedIn', 'CheckedOut'] }
     }).lean();
 
     const orders = await Order.find({
-      createdAt: { $gte: sixMonthsAgo.toDate() },
+      createdAt: { $gte: timeRangeStart.toDate() },
       status: { $ne: 'Cancelled' }
     }).lean();
 
     const monthlyData = [];
-    let currentIterMonth = sixMonthsAgo.clone();
+    let currentIterTime = timeRangeStart.clone();
 
-    // Iterate month by month
-    while (currentIterMonth.isBefore(today.add(1, 'month'))) {
-      const monthStart = currentIterMonth.startOf('month');
-      const monthEnd = currentIterMonth.endOf('month');
-      const monthKey = currentIterMonth.format('MMM');
-      const daysInMonth = currentIterMonth.daysInMonth();
-      const totalCapacity = totalRoomsCount * daysInMonth;
+    // Iterate through the specified period
+    for (let i = 0; i < iterations; i++) {
+      const periodStart = currentIterTime.startOf(iterationUnit);
+      const periodEnd = currentIterTime.endOf(iterationUnit);
+      const periodKey = currentIterTime.format(labelFormat);
+      const daysInPeriod = periodEnd.diff(periodStart, 'day') + 1;
+      const totalCapacity = totalRoomsCount * daysInPeriod;
 
       let occupiedNights = 0;
       let monthRoomRevenue = 0;
@@ -274,9 +309,9 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
         const bStart = dayjs(b.checkIn);
         const bEnd = dayjs(b.checkOut);
         
-        // Calculate overlap with this month
-        const effectiveStart = bStart.isAfter(monthStart) ? bStart : monthStart;
-        const effectiveEnd = bEnd.isBefore(monthEnd) ? bEnd : monthEnd;
+        // Calculate overlap with this period
+        const effectiveStart = bStart.isAfter(periodStart) ? bStart : periodStart;
+        const effectiveEnd = bEnd.isBefore(periodEnd) ? bEnd : periodEnd;
 
         if (effectiveEnd.isAfter(effectiveStart)) {
           const nights = effectiveEnd.diff(effectiveStart, 'day');
@@ -284,25 +319,28 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (_r
           
           if (room) {
             occupiedNights += nights;
-            // Revenue Attribution: (Nightly Rate * Nights in this month)
+            // Revenue Attribution: (Nightly Rate * Nights in this period)
             monthRoomRevenue += (room.rate * nights);
           }
         }
       });
 
       const monthFnBRevenue = orders
-        .filter(o => dayjs((o as any).createdAt).isSame(currentIterMonth, 'month'))
+        .filter(o => {
+          const orderTime = dayjs((o as any).createdAt);
+          return orderTime.isAfter(periodStart) && orderTime.isBefore(periodEnd);
+        })
         .reduce((sum, o) => sum + o.totalAmount, 0);
 
       monthlyData.push({
-        name: monthKey,
+        name: periodKey,
         occupancy: totalCapacity > 0 ? Math.round((occupiedNights / totalCapacity) * 100) : 0,
         revenue: monthRoomRevenue + monthFnBRevenue,
         roomRevenue: monthRoomRevenue,
         fnbRevenue: monthFnBRevenue
       });
 
-      currentIterMonth = currentIterMonth.add(1, 'month');
+      currentIterTime = currentIterTime.add(1, iterationUnit);
     }
 
     // Room Type Distribution Stats

@@ -3,6 +3,7 @@ import { User } from '../models/user.js';
 import { Booking } from '../models/booking.js';
 import { Order } from '../models/order.js';
 import { TripRequest } from '../models/tripRequest.js';
+import { Invoice } from '../models/invoice.js';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { logger } from '../lib/logger.js';
 import admin from '../lib/firebaseAdmin.js'; 
@@ -260,13 +261,39 @@ userRouter.get('/dashboard', authenticate(), async (req: Request, res: Response)
       status: { $in: ['Confirmed', 'CheckedIn'] }
     })
       .populate('roomId')
+      .populate('appliedDealId', 'dealName discount') // Include deal info
       .sort({ checkIn: 1 })
       .lean();
     
-    // Get all orders for user's bookings
+    // Get completed bookings (CheckedOut) with invoice totals
+    const completedBookings = await Booking.find({ 
+      guestId: user.mongoId,
+      status: 'CheckedOut'
+    })
+      .populate('roomId')
+      .populate('appliedDealId', 'dealName discount') // Include deal info
+      .sort({ checkOut: -1 })
+      .lean();
+    
+    // Attach invoice totals to completed bookings
+    const completedBookingsWithInvoices = await Promise.all(
+      completedBookings.map(async (booking) => {
+        const invoice = await Invoice.findOne({ 
+          bookingId: booking._id, 
+          status: 'paid' 
+        }).lean();
+        
+        return {
+          ...booking,
+          invoiceTotal: invoice?.total || 0
+        };
+      })
+    );
+    
+    // Get active orders only (Preparing or Ready) for CheckedIn bookings
     const orders = await Order.find({ 
       guestId: user.mongoId,
-      status: { $ne: 'Cancelled' }
+      status: { $in: ['Preparing', 'Ready'] }
     })
       .populate('bookingId', 'checkIn checkOut roomId')
       .sort({ createdAt: -1 })
@@ -284,6 +311,7 @@ userRouter.get('/dashboard', authenticate(), async (req: Request, res: Response)
     
     res.json({
       bookings,
+      completedBookings: completedBookingsWithInvoices,
       orders,
       tripRequests
     });

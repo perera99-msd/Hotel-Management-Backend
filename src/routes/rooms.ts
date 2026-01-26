@@ -45,14 +45,18 @@ roomsRouter.get('/', async (req: Request, res: Response) => {
 // GET /api/rooms/available?checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD
 roomsRouter.get('/available', async (req: Request, res: Response) => {
   try {
+    console.log('[ROOMS/AVAILABLE] Request received:', { query: req.query });
+    
     const { checkIn, checkOut, type } = req.query as { checkIn?: string; checkOut?: string; type?: RoomType };
     if (!checkIn || !checkOut) {
+      console.error('[ROOMS/AVAILABLE] Missing date parameters:', { checkIn, checkOut });
       return res.status(400).json({ error: 'checkIn and checkOut are required' });
     }
 
     const start = new Date(checkIn);
     const end = new Date(checkOut);
     if (isNaN(start.getTime()) || isNaN(end.getTime()) || start >= end) {
+      console.error('[ROOMS/AVAILABLE] Invalid date range:', { checkIn, checkOut, startValid: !isNaN(start.getTime()), endValid: !isNaN(end.getTime()), startGteEnd: start >= end });
       return res.status(400).json({ error: 'Invalid date range' });
     }
 
@@ -60,6 +64,7 @@ roomsRouter.get('/available', async (req: Request, res: Response) => {
     const roomFilter: any = {};
     if (type && type !== ('All' as any)) roomFilter.type = type;
     const allRooms = await Room.find(roomFilter).lean();
+    console.log(`[ROOMS/AVAILABLE] Found ${allRooms.length} total rooms`, { filter: roomFilter });
 
     // Find bookings that block availability
     const blockingStatuses = ['Confirmed', 'CheckedIn'];
@@ -86,10 +91,25 @@ roomsRouter.get('/available', async (req: Request, res: Response) => {
 
     const unavailableIds = new Set(blockingBookings.map((b) => b._id.toString()));
     const available = allRooms.filter((r) => !unavailableIds.has(r._id.toString()));
+    console.log(`[ROOMS/AVAILABLE] Returning ${available.length} available rooms (${unavailableIds.size} unavailable)`);
 
-    res.json(available);
+    // Add the applicable rate for this booking's check-in month
+    const checkInMonth = start.getMonth(); // 0-11
+    const availableWithRates = available.map((room: any) => {
+      const monthlyRates = room.monthlyRates || [];
+      const applicableRate = monthlyRates[checkInMonth] || room.rate || 0;
+      return {
+        ...room,
+        id: room._id.toString(),
+        applicableRate, // Rate for the booking month
+        bookingMonth: checkInMonth
+      };
+    });
+
+    res.json(availableWithRates);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to calculate availability' });
+    console.error('[ROOMS/AVAILABLE] Error:', err);
+    res.status(500).json({ error: 'Failed to calculate availability', details: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -108,6 +128,10 @@ roomsRouter.get('/:id', async (req: Request, res: Response) => {
 roomsRouter.post('/', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const payload = req.body as Partial<IRoom>;
+    // Ensure monthlyRates is populated with the base rate for all 12 months if not provided
+    if (!payload.monthlyRates && payload.rate) {
+      payload.monthlyRates = Array(12).fill(payload.rate);
+    }
     const room = await Room.create(payload);
     res.status(201).json({ ...room.toObject(), id: room._id });
   } catch (err: any) {
@@ -151,5 +175,24 @@ roomsRouter.patch('/:id/status', requireRoles('admin', 'receptionist'), async (r
     res.json({ ...room.toObject(), id: room._id });
   } catch (err) {
     res.status(400).json({ error: 'Failed to update room status' });
+  }
+});
+
+// PATCH /api/rooms/:id/monthly-rates (admin) - Update monthly rates
+roomsRouter.patch('/:id/monthly-rates', requireRoles('admin'), async (req: Request, res: Response) => {
+  try {
+    const { monthlyRates } = req.body as { monthlyRates: number[] };
+    if (!Array.isArray(monthlyRates) || monthlyRates.length !== 12) {
+      return res.status(400).json({ error: 'monthlyRates must be an array of 12 numbers' });
+    }
+    const room = await Room.findByIdAndUpdate(
+      req.params.id,
+      { monthlyRates },
+      { new: true }
+    );
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    res.json({ ...room.toObject(), id: room._id });
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to update monthly rates' });
   }
 });

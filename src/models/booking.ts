@@ -19,6 +19,14 @@ export interface IBooking extends Document {
     mealPlan?: string;
     specialRequests?: string;
   };
+  // Pricing fields for rates/deals
+  appliedRate?: number;
+  appliedRateSource?: 'room' | 'rate' | 'deal';
+  appliedRateId?: Types.ObjectId;
+  appliedDealId?: Types.ObjectId;
+  appliedDiscount?: number;
+  roomNights?: number;
+  roomTotal?: number;
 }
 
 const BookingSchema = new Schema<IBooking>(
@@ -45,7 +53,14 @@ const BookingSchema = new Schema<IBooking>(
         bedType: { type: String },
         mealPlan: { type: String },
         specialRequests: { type: String }
-    }
+    },
+    appliedRate: { type: Number },
+    appliedRateSource: { type: String, enum: ['room', 'rate', 'deal'] },
+    appliedRateId: { type: Schema.Types.ObjectId, ref: 'Rate' },
+    appliedDealId: { type: Schema.Types.ObjectId, ref: 'Deal' },
+    appliedDiscount: { type: Number, default: 0 },
+    roomNights: { type: Number },
+    roomTotal: { type: Number }
   },
   { timestamps: true }
 );

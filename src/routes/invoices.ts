@@ -15,15 +15,16 @@ async function buildAutoLineItems(bookingId: string): Promise<IInvoiceLineItem[]
 
   const items: IInvoiceLineItem[] = [];
 
-  if ((booking as any).roomId?.rate) {
+    if ((booking as any).roomId?.rate || (booking as any).appliedRate) {
     const checkIn = new Date(booking.checkIn);
     const checkOut = new Date(booking.checkOut);
     const nights = Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)));
-    const rate = (booking as any).roomId.rate;
+      const rate = (booking as any).appliedRate || (booking as any).roomId.rate;
+      const roomTotal = (booking as any).roomTotal || rate * nights;
     items.push({
       description: `Room ${(booking as any).roomId.roomNumber || ''} (${nights} night${nights > 1 ? 's' : ''})`,
       qty: 1,
-      amount: rate * nights,
+        amount: roomTotal,
       category: 'room',
       source: 'booking',
       refId: booking._id as any

@@ -5,6 +5,7 @@ import { Booking } from '../models/booking.js';
 import { Room } from '../models/room.js';
 import { User } from '../models/user.js'; 
 import { Invoice } from '../models/invoice.js';
+import { Deal } from '../models/deal.js';
 import { sendNotification } from '../services/notificationService.js';
 
 export const bookingsRouter = Router();
@@ -21,6 +22,7 @@ bookingsRouter.get('/', async (req: Request, res: Response) => {
       const bookings = await Booking.find(filter)
         .populate('roomId')
         .populate('guestId', 'name email phone')
+        .populate('appliedDealId', 'dealName discount') // Include deal info
         .sort({ createdAt: -1 })
         .lean();
         
@@ -81,7 +83,135 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
 
     const finalStatus = (requestedStatus === 'checked-in' || requestedStatus === 'CheckedIn') ? 'CheckedIn' : 'Confirmed';
 
-    // 3. Create Booking
+    // --- Pricing logic (monthly rate + deal aware) ---
+    const room = await Room.findById(roomId).lean();
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    const nights = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+
+    // Use monthly rate based on check-in month (0-11 = Jan-Dec)
+    const checkInMonth = start.getMonth(); // 0-11
+    const monthlyRates = (room as any).monthlyRates || [];
+    const monthlyRate = monthlyRates[checkInMonth] || (room as any).rate || 0;
+
+    let appliedRateSource: 'room' | 'deal' = 'room';
+    let appliedRate = monthlyRate;
+    let appliedDealId: any = undefined;
+    let appliedDiscount = 0;
+
+    const allowedDealStatuses = ['Ongoing', 'New', 'Inactive', 'Full'];
+
+    // Query deals: roomId must be IN the roomIds array OR roomType matches
+    const potentialDeals = await Deal.find({
+      status: { $in: allowedDealStatuses },
+      $or: [
+        { roomIds: { $in: [roomId] } }, // Check if roomId is in the roomIds array
+        { roomType: new RegExp(`^${(room as any).type}$`, 'i') }
+      ]
+    }).lean();
+
+    console.log(`[BOOKING] Found ${potentialDeals.length} potential deals for room ${roomId} (type: ${(room as any).type})`);
+    if (potentialDeals.length > 0) {
+      console.log('[BOOKING] Potential deals:', potentialDeals.map(d => ({
+        name: d.dealName,
+        discount: d.discount,
+        startDate: d.startDate,
+        endDate: d.endDate,
+        roomIds: (d as any).roomIds,
+        status: d.status
+      })));
+    }
+    console.log('[BOOKING] Booking period:', { start: start.toISOString(), end: end.toISOString() });
+
+    const isDealInWindow = (deal: any) => {
+      const startDate = new Date(deal.startDate);
+      const endDate = new Date(deal.endDate);
+      // Check if booking period overlaps with deal period at all
+      // Deal is applicable if: dealStart <= bookingEnd AND dealEnd >= bookingStart
+      const overlaps = !isNaN(startDate.getTime()) && !isNaN(endDate.getTime()) && startDate <= end && endDate >= start;
+      console.log(`[BOOKING] Deal "${deal.dealName}" window check:`, {
+        dealStart: startDate.toISOString(),
+        dealEnd: endDate.toISOString(),
+        overlaps
+      });
+      return overlaps;
+    };
+
+    const applicableDeals = potentialDeals.filter((deal) => {
+      const typeMatch = Array.isArray(deal.roomType) && deal.roomType.some((t: string) => t.toLowerCase() === ((room as any).type || '').toLowerCase());
+      const roomMatch = Array.isArray((deal as any).roomIds) && (deal as any).roomIds.some((id: any) => id.toString() === roomId.toString());
+      const inWindow = isDealInWindow(deal);
+      const applicable = inWindow && (roomMatch || typeMatch);
+      console.log(`[BOOKING] Deal "${deal.dealName}" filtering:`, {
+        typeMatch,
+        roomMatch,
+        inWindow,
+        applicable
+      });
+      return applicable;
+    });
+
+    console.log(`[BOOKING] ${applicableDeals.length} deals are applicable after filtering`);
+    if (applicableDeals.length > 0) {
+      console.log('[BOOKING] Applicable deals:', applicableDeals.map(d => ({
+        name: d.dealName,
+        discount: d.discount,
+        price: d.price
+      })));
+    }
+
+    const computeDealRate = (deal: any, baseRate: number) => {
+      // Only use deal.price if it's explicitly set and greater than 0
+      // Otherwise, apply the discount percentage to the base rate
+      if (typeof deal.price === 'number' && !isNaN(deal.price) && deal.price > 0) {
+        return deal.price;
+      }
+      const discount = Number(deal.discount) || 0;
+      return baseRate * (1 - discount / 100);
+    };
+
+    const selectedDeal = req.body.selectedDealId && mongoose.Types.ObjectId.isValid(req.body.selectedDealId)
+      ? applicableDeals.find((d) => d._id.toString() === req.body.selectedDealId)
+      : undefined;
+
+    const bestAutoDeal = applicableDeals.reduce<{ deal: any | null; rate: number }>((best, deal) => {
+      const rateWithDeal = computeDealRate(deal, appliedRate);
+      console.log(`[BOOKING] Deal "${deal.dealName}" computed rate: $${rateWithDeal} (discount: ${deal.discount}%, base: $${appliedRate})`);
+      if (best.deal === null || rateWithDeal < best.rate) {
+        return { deal, rate: rateWithDeal };
+      }
+      return best;
+    }, { deal: null, rate: appliedRate });
+
+    console.log(`[BOOKING] Best auto-deal:`, bestAutoDeal.deal ? {
+      name: bestAutoDeal.deal.dealName,
+      discount: bestAutoDeal.deal.discount,
+      finalRate: bestAutoDeal.rate
+    } : 'None');
+
+    const chosenDeal = selectedDeal || bestAutoDeal.deal;
+    if (chosenDeal) {
+      appliedRateSource = 'deal';
+      appliedDealId = chosenDeal._id;
+      appliedDiscount = chosenDeal.discount || 0;
+      appliedRate = computeDealRate(chosenDeal, appliedRate);
+      console.log(`[BOOKING] ✅ Applied deal "${chosenDeal.dealName}": ${appliedDiscount}% discount, final rate: $${appliedRate}`);
+    } else {
+      console.log(`[BOOKING] ℹ️  No deal applied, using base rate: $${appliedRate}`);
+    }
+
+    const roomTotal = appliedRate * nights;
+
+    console.log('[BOOKING] Final booking calculation:', {
+      baseMonthlyRate: monthlyRate,
+      nights,
+      appliedRate,
+      appliedRateSource,
+      appliedDiscount,
+      roomTotal
+    });
+
+    // 3. Create Booking (store applied pricing)
     const newBooking = await Booking.create({
       roomId,
       guestId,
@@ -89,10 +219,15 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
       checkOut: end,
       status: finalStatus,
       source: source || 'Local',
-      // ✅ Save the new fields
       adults: adults || 1,
       children: children || 0,
-      preferences: preferences || {}
+      preferences: preferences || {},
+      appliedRate,
+      appliedRateSource,
+      appliedDealId,
+      appliedDiscount,
+      roomNights: nights,
+      roomTotal
     }) as any;
 
     if (finalStatus === 'CheckedIn') {
@@ -166,6 +301,11 @@ bookingsRouter.put('/:id', requireRoles('admin', 'receptionist', 'manager'), asy
     try {
       const booking = await Booking.findById(req.params.id);
       if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+      // Idempotent: if already checked out, return success
+      if (booking.status === 'CheckedOut') {
+        return res.json(booking);
+      }
       
       // Prevent cancellation once checked-in
       if (booking.status === 'CheckedIn' && req.body.status === 'Cancelled') {
@@ -336,69 +476,110 @@ bookingsRouter.post('/:id/checkin', requireRoles('admin', 'receptionist'), async
   
 // --- POST: Check-Out ---
 bookingsRouter.post('/:id/checkout', requireRoles('admin', 'receptionist'), async (req: Request, res: Response) => {
+    let hasResponded = false;
+    
     try {
       const booking = await Booking.findById(req.params.id);
-      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      if (!booking) {
+        hasResponded = true;
+        return res.status(404).json({ error: 'Booking not found' });
+      }
 
-      // Require invoice to be paid before checkout
-      const invoice = await Invoice.findOne({ bookingId: booking._id, status: 'paid' });
+      // If already checked out, just return success (idempotent)
+      if (booking.status === 'CheckedOut') {
+        hasResponded = true;
+        return res.status(200).json({ success: true, message: 'Booking already checked out', booking });
+      }
+
+      // Check if invoice exists AND is paid - REQUIRED for checkout
+      const invoice = await Invoice.findOne({ bookingId: booking._id });
       if (!invoice) {
+        hasResponded = true;
+        return res.status(400).json({ error: 'Invoice is required before checkout.' });
+      }
+      if (invoice.status !== 'paid') {
+        hasResponded = true;
         return res.status(400).json({ error: 'Booking cannot be checked out until invoice is paid.' });
       }
 
       booking.status = 'CheckedOut';
       await booking.save();
-      await Room.findByIdAndUpdate(booking.roomId, { status: 'Cleaning' });
-      
-      // ✅ SEND NOTIFICATION FOR CHECK-OUT
       try {
-        const guest = await User.findById(booking.guestId);
-        const room = await Room.findById(booking.roomId).lean();
-        const roomLabel = room?.roomNumber ? `Room ${room.roomNumber}` : 'your room';
-
-        if (guest) {
-          const customerMessage = `Thank you for staying with us! ${roomLabel} has been checked out. We hope you enjoyed your stay at Grand Hotel.`;
-          const staffMessage = `Guest ${guest.name || 'customer'} checked out from ${roomLabel}.`;
-          
-          // Customer notification (email + SMS + dashboard)
-          await sendNotification({
-            type: 'BOOKING',
-            title: 'Check-out Complete',
-            message: customerMessage,
-            recipientEmail: guest.email,
-            recipientPhone: guest.phone,
-            targetRoles: ['customer'],
-            targetUserId: (guest as any)._id.toString(),
-            userId: (guest as any)._id.toString(),
-            notifyAdmin: false,
-            data: {
-              bookingId: (booking as any)._id.toString(),
-              roomId: booking.roomId.toString(),
-              guestName: guest.name,
-              status: 'CheckedOut'
-            }
-          });
-
-          // Staff notification (dashboard only)
-          await sendNotification({
-            type: 'BOOKING',
-            title: 'Guest Checked Out',
-            message: staffMessage,
-            targetRoles: ['admin', 'receptionist', 'manager'],
-            data: {
-              bookingId: (booking as any)._id.toString(),
-              roomId: booking.roomId.toString(),
-              guestName: guest.name,
-              status: 'CheckedOut'
-            }
-          });
-        }
-      } catch (notifErr: any) {
-        console.error("❌ [Check-out Notification Failed]", notifErr.message);
+        await Room.findByIdAndUpdate(booking.roomId, { status: 'Cleaning' });
+      } catch (roomErr: any) {
+        console.error('⚠️ [Checkout] Room update failed:', roomErr.message);
       }
       
-      res.json(booking);
-    } catch (err) {
-      res.status(500).json({ error: 'Failed to check out' });
+      // ✅ Close all orders related to this booking
+      try {
+        await Order.updateMany(
+          { bookingId: booking._id, status: { $nin: ['Cancelled', 'Served'] } },
+          { status: 'Served' }
+        );
+      } catch (orderErr: any) {
+        console.error('⚠️ [Checkout] Order update failed:', orderErr.message);
+      }
+      
+      // ✅ SEND NOTIFICATION FOR CHECK-OUT (async - don't await, don't let it block response)
+      (async () => {
+        try {
+          const guest = await User.findById(booking.guestId);
+          const room = await Room.findById(booking.roomId).lean();
+          const roomLabel = room?.roomNumber ? `Room ${room.roomNumber}` : 'your room';
+
+          if (guest) {
+            const customerMessage = `Thank you for staying with us! ${roomLabel} has been checked out. We hope you enjoyed your stay at Grand Hotel.`;
+            const staffMessage = `Guest ${guest.name || 'customer'} checked out from ${roomLabel}.`;
+            
+            // Customer notification (email + SMS + dashboard)
+            await sendNotification({
+              type: 'BOOKING',
+              title: 'Check-out Complete',
+              message: customerMessage,
+              recipientEmail: guest.email,
+              recipientPhone: guest.phone,
+              targetRoles: ['customer'],
+              targetUserId: (guest as any)._id.toString(),
+              userId: (guest as any)._id.toString(),
+              notifyAdmin: false,
+              data: {
+                bookingId: (booking as any)._id.toString(),
+                roomId: booking.roomId.toString(),
+                guestName: guest.name,
+                status: 'CheckedOut'
+              }
+            });
+
+            // Staff notification (dashboard only)
+            await sendNotification({
+              type: 'BOOKING',
+              title: 'Guest Checked Out',
+              message: staffMessage,
+              targetRoles: ['admin', 'receptionist', 'manager'],
+              data: {
+                bookingId: (booking as any)._id.toString(),
+                roomId: booking.roomId.toString(),
+                guestName: guest.name,
+                status: 'CheckedOut'
+              }
+            });
+          }
+        } catch (notifErr: any) {
+          console.error("❌ [Check-out Notification Failed]", notifErr.message);
+        }
+      })();
+      
+      // Send success response immediately - checkout is complete
+      if (!hasResponded) {
+        hasResponded = true;
+        res.status(200).json({ success: true, message: 'Guest checked out successfully', booking });
+      }
+    } catch (err: any) {
+      console.error('❌ [Checkout Error]', err.message || err);
+      console.error('❌ [Checkout Error Stack]', err.stack);
+      if (!hasResponded) {
+        hasResponded = true;
+        res.status(500).json({ error: 'Failed to check out' });
+      }
     }
 });
