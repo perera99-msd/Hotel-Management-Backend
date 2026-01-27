@@ -7,11 +7,14 @@ const settingsSchema = new mongoose.Schema({
   address: { type: String, default: '123 Main Street' },
   phone: { type: String, default: '+1-555-0123' },
   email: { type: String, default: 'info@grandhotel.com' },
-  
+
   // Notification Preferences
   emailNotifications: { type: Boolean, default: true },
   smsNotifications: { type: Boolean, default: false },
   lowStockAlerts: { type: Boolean, default: true },
+
+  // Floors Management (stack-like, ground-only by default)
+  floors: { type: [Number], default: [0] },
 }, { timestamps: true });
 
 export const Settings = mongoose.model('Settings', settingsSchema);
