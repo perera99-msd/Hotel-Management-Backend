@@ -1,12 +1,12 @@
-import { Router, Request, Response } from 'express';
-import { User } from '../models/user.js';
+import { Request, Response, Router } from 'express';
+import admin from '../lib/firebaseAdmin.js';
+import { logger } from '../lib/logger.js';
+import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
+import { Invoice } from '../models/invoice.js';
 import { Order } from '../models/order.js';
 import { TripRequest } from '../models/tripRequest.js';
-import { Invoice } from '../models/invoice.js';
-import { authenticate, requireRoles } from '../middleware/auth.js';
-import { logger } from '../lib/logger.js';
-import admin from '../lib/firebaseAdmin.js'; 
+import { User } from '../models/user.js';
 
 export const userRouter = Router();
 
@@ -64,10 +64,22 @@ userRouter.use(authenticate());
  */
 userRouter.get('/me', async (req: Request, res: Response) => {
   try {
-    const user = await User.findOne({ uid: req.user?.uid });
-    
+    if (!req.user?.uid) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    let user = await User.findOne({ uid: req.user.uid });
+
+    // If user doesn't exist, create a new profile with Firebase data
     if (!user) {
-      return res.status(404).json({ error: 'User profile not found in database' });
+      user = await User.create({
+        uid: req.user.uid,
+        email: req.user.email || '',
+        name: req.user.email?.split('@')[0] || 'User',
+        phone: '',
+        roles: ['customer'],
+        status: 'active'
+      });
     }
 
     res.json(user);
@@ -83,14 +95,14 @@ userRouter.get('/me', async (req: Request, res: Response) => {
 userRouter.put('/me', async (req: Request, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-    const { name, phone } = req.body; 
-    
+    const { name, phone } = req.body;
+
     const user = await User.findOneAndUpdate(
       { uid: req.user.uid },
       { name, phone },
       { new: true }
     );
-    
+
     res.json(user);
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to update profile' });
@@ -120,18 +132,18 @@ userRouter.get('/', requireRoles('admin', 'manager', 'receptionist'), async (req
 userRouter.post('/guest', requireRoles('admin', 'receptionist', 'manager'), async (req: Request, res: Response) => {
   try {
     const { email, name, phone } = req.body;
-    
+
     if (!email || !name) {
-        return res.status(400).json({ error: "Name and Email are required" });
+      return res.status(400).json({ error: "Name and Email are required" });
     }
-    
+
     const targetEmail = email.toLowerCase().trim();
-    
+
     // Check if user already exists
     let user = await User.findOne({ email: targetEmail });
     if (user) {
-        // Return existing user so booking can proceed
-        return res.status(200).json(user);
+      // Return existing user so booking can proceed
+      return res.status(200).json(user);
     }
 
     // Create new shadow user (no UID)
@@ -142,7 +154,7 @@ userRouter.post('/guest', requireRoles('admin', 'receptionist', 'manager'), asyn
       roles: ['customer'],
       status: 'active'
     });
-    
+
     res.status(201).json(user);
   } catch (err: any) {
     console.error("Guest Creation Error:", err);
@@ -159,43 +171,43 @@ userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Resp
     const { email, name, phone, role, password } = req.body;
 
     if (!email || !password) {
-        return res.status(400).json({ error: "Email and password are required" });
+      return res.status(400).json({ error: "Email and password are required" });
     }
 
     // 1. Create in Firebase
     let firebaseUser;
     try {
-        firebaseUser = await admin.auth().createUser({
-            email,
-            password,
-            displayName: name,
-            phoneNumber: phone || undefined
-        });
+      firebaseUser = await admin.auth().createUser({
+        email,
+        password,
+        displayName: name,
+        phoneNumber: phone || undefined
+      });
     } catch (firebaseError: any) {
-        // If user already exists in Firebase, try to find them
-        if (firebaseError.code === 'auth/email-already-exists') {
-             try {
-                 firebaseUser = await admin.auth().getUserByEmail(email);
-             } catch (e) {
-                 return res.status(500).json({ error: "User exists in Auth but could not be retrieved." });
-             }
-        } else {
-            return res.status(400).json({ error: `Firebase Error: ${firebaseError.message}` });
+      // If user already exists in Firebase, try to find them
+      if (firebaseError.code === 'auth/email-already-exists') {
+        try {
+          firebaseUser = await admin.auth().getUserByEmail(email);
+        } catch (e) {
+          return res.status(500).json({ error: "User exists in Auth but could not be retrieved." });
         }
+      } else {
+        return res.status(400).json({ error: `Firebase Error: ${firebaseError.message}` });
+      }
     }
 
     // 2. Create/Update in MongoDB
     const newUser = await User.findOneAndUpdate(
-        { email: email.toLowerCase() },
-        {
-            uid: firebaseUser.uid,
-            email: email.toLowerCase(),
-            name,
-            phone: phone || '',
-            roles: [role || 'customer'],
-            status: 'active'
-        },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
+      { email: email.toLowerCase() },
+      {
+        uid: firebaseUser.uid,
+        email: email.toLowerCase(),
+        name,
+        phone: phone || '',
+        roles: [role || 'customer'],
+        status: 'active'
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
     res.status(201).json(newUser);
@@ -214,7 +226,7 @@ userRouter.put('/:id', requireRoles('admin'), async (req: Request, res: Response
     const { name, role, status, phone } = req.body;
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { name, roles: [role], status, phone }, 
+      { name, roles: [role], status, phone },
       { new: true }
     );
     res.json(user);
@@ -231,7 +243,7 @@ userRouter.delete('/:id', requireRoles('admin'), async (req: Request, res: Respo
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    
+
     try {
       if (user.uid) {
         await admin.auth().deleteUser(user.uid);
@@ -254,9 +266,9 @@ userRouter.delete('/:id', requireRoles('admin'), async (req: Request, res: Respo
 userRouter.get('/dashboard', authenticate(), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    
+
     // Get ongoing bookings (Confirmed or CheckedIn)
-    const bookings = await Booking.find({ 
+    const bookings = await Booking.find({
       guestId: user.mongoId,
       status: { $in: ['Confirmed', 'CheckedIn'] }
     })
@@ -264,9 +276,9 @@ userRouter.get('/dashboard', authenticate(), async (req: Request, res: Response)
       .populate('appliedDealId', 'dealName discount') // Include deal info
       .sort({ checkIn: 1 })
       .lean();
-    
+
     // Get completed bookings (CheckedOut) with invoice totals
-    const completedBookings = await Booking.find({ 
+    const completedBookings = await Booking.find({
       guestId: user.mongoId,
       status: 'CheckedOut'
     })
@@ -274,41 +286,41 @@ userRouter.get('/dashboard', authenticate(), async (req: Request, res: Response)
       .populate('appliedDealId', 'dealName discount') // Include deal info
       .sort({ checkOut: -1 })
       .lean();
-    
+
     // Attach invoice totals to completed bookings
     const completedBookingsWithInvoices = await Promise.all(
       completedBookings.map(async (booking) => {
-        const invoice = await Invoice.findOne({ 
-          bookingId: booking._id, 
-          status: 'paid' 
+        const invoice = await Invoice.findOne({
+          bookingId: booking._id,
+          status: 'paid'
         }).lean();
-        
+
         return {
           ...booking,
           invoiceTotal: invoice?.total || 0
         };
       })
     );
-    
+
     // Get active orders only (Preparing or Ready) for CheckedIn bookings
-    const orders = await Order.find({ 
+    const orders = await Order.find({
       guestId: user.mongoId,
       status: { $in: ['Preparing', 'Ready'] }
     })
       .populate('bookingId', 'checkIn checkOut roomId')
       .sort({ createdAt: -1 })
       .lean();
-    
+
     // Get all trip requests for user's bookings
-    const tripRequests = await TripRequest.find({ 
+    const tripRequests = await TripRequest.find({
       requestedBy: user.mongoId,
       status: { $nin: ['Cancelled', 'Rejected', 'Completed'] }
     })
-      .populate('packageId', 'name location price')
+      .populate('packageId', 'name location price images')
       .populate('bookingId', 'checkIn checkOut')
       .sort({ createdAt: -1 })
       .lean();
-    
+
     res.json({
       bookings,
       completedBookings: completedBookingsWithInvoices,

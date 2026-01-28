@@ -1,5 +1,5 @@
 /* */
-import { Router, Request, Response } from 'express';
+import { Request, Response, Router } from 'express';
 import mongoose from 'mongoose';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Deal } from '../models/deal.js';
@@ -19,22 +19,37 @@ const normalizeIds = (value: any) => {
 // GET /api/deals
 dealsRouter.get('/', async (req: Request, res: Response) => {
   try {
+    const now = new Date();
+
+    // Auto-remove expired deals
+    const allDeals = await Deal.find();
+    const expiredIds = allDeals
+      .filter((d) => {
+        const end = new Date(d.endDate);
+        return !Number.isNaN(end.getTime()) && end < now;
+      })
+      .map((d) => d._id);
+
+    if (expiredIds.length > 0) {
+      await Deal.deleteMany({ _id: { $in: expiredIds } });
+    }
+
     const deals = await Deal.find().sort({ createdAt: -1 });
     const formattedDeals = deals.map(d => ({
-        id: d._id,
-        referenceNumber: d.referenceNumber,
-        dealName: d.dealName,
-
-        endDate: d.endDate,
+      id: d._id,
+      referenceNumber: d.referenceNumber,
+      dealName: d.dealName,
+      endDate: d.endDate,
       roomType: d.roomType.join(', '),
       roomTypeRaw: d.roomType,
       roomIds: (d as any).roomIds?.map((r: any) => r.toString()) || [],
-        status: d.status,
-        price: d.price,
-        description: d.description,
-        tags: d.tags,
-        startDate: d.startDate,
-        discount: d.discount
+      status: d.status,
+      price: d.price,
+      description: d.description,
+      tags: d.tags,
+      startDate: d.startDate,
+      discount: d.discount,
+      image: d.image
     }));
     res.json(formattedDeals);
   } catch (err) {
@@ -46,12 +61,12 @@ dealsRouter.get('/', async (req: Request, res: Response) => {
 dealsRouter.post('/', requireRoles('admin', 'manager'), async (req: Request, res: Response) => {
   try {
     const { referenceNumber, roomIds } = req.body;
-    
+
     // Validate required fields
     if (!roomIds || !Array.isArray(roomIds) || roomIds.length === 0) {
       return res.status(400).json({ error: 'At least one room must be selected for the deal' });
     }
-    
+
     const existing = await Deal.findOne({ referenceNumber });
     if (existing) return res.status(400).json({ error: 'Reference number already exists' });
 
@@ -80,7 +95,7 @@ dealsRouter.put('/:id', requireRoles('admin', 'manager'), async (req: Request, r
   try {
     const updateData: any = { ...req.body };
     if (typeof updateData.roomType === 'string') {
-        updateData.roomType = updateData.roomType.split(',').map((s: string) => s.trim());
+      updateData.roomType = updateData.roomType.split(',').map((s: string) => s.trim());
     }
     if (updateData.roomIds) {
       updateData.roomIds = normalizeIds(updateData.roomIds);

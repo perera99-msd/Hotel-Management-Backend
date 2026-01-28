@@ -1,10 +1,10 @@
-import { Router, Request, Response } from 'express';
+import { Request, Response, Router } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
-import { Invoice, IInvoiceLineItem } from '../models/invoice.js';
 import { Booking } from '../models/booking.js';
+import { IInvoiceLineItem, Invoice } from '../models/invoice.js';
 import { Order } from '../models/order.js';
-import { TripRequest } from '../models/tripRequest.js';
 import { Revenue } from '../models/revenue.js';
+import { TripRequest } from '../models/tripRequest.js';
 
 export const invoicesRouter = Router();
 invoicesRouter.use(authenticate());
@@ -15,20 +15,93 @@ async function buildAutoLineItems(bookingId: string): Promise<IInvoiceLineItem[]
 
   const items: IInvoiceLineItem[] = [];
 
-    if ((booking as any).roomId?.rate || (booking as any).appliedRate) {
+  // Use detailed rate breakdown if available
+  if ((booking as any).rateBreakdown && (booking as any).rateBreakdown.lineItemDescriptions) {
+    const breakdown = (booking as any).rateBreakdown;
+    const roomNumber = (booking as any).roomId?.roomNumber || '';
+
+    // Add each monthly breakdown as a separate line item with date ranges
     const checkIn = new Date(booking.checkIn);
-    const checkOut = new Date(booking.checkOut);
-    const nights = Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)));
+    let segmentStart = new Date(checkIn);
+
+    breakdown.monthlyBreakdowns.forEach((month: any, index: number) => {
+      // Calculate the end date for this segment
+      const segmentEnd = index === breakdown.monthlyBreakdowns.length - 1
+        ? new Date(booking.checkOut)
+        : new Date(month.year, month.month + 1, 1);
+
+      const startDay = segmentStart.getDate();
+      const startMonth = segmentStart.getMonth();
+      const startYear = segmentStart.getFullYear();
+      const endDay = segmentEnd.getDate();
+      const endMonth = segmentEnd.getMonth();
+      const endYear = segmentEnd.getFullYear();
+
+      const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+      let dateRange = '';
+      if (startMonth === endMonth && startYear === endYear) {
+        dateRange = `${monthNames[startMonth]} ${startDay}-${endDay}, ${startYear}`;
+      } else {
+        dateRange = `${monthNames[startMonth]} ${startDay}, ${startYear} - ${monthNames[endMonth]} ${endDay}, ${endYear}`;
+      }
+
+      if (month.dealDays && month.dealDays > 0) {
+        // Split into non-deal and deal days
+        const nonDealDays = month.days - month.dealDays;
+
+        if (nonDealDays > 0) {
+          items.push({
+            description: `Room ${roomNumber} - ${dateRange} (${nonDealDays} night${nonDealDays > 1 ? 's' : ''} @ $${month.rate.toFixed(2)})`,
+            qty: nonDealDays,
+            amount: nonDealDays * month.rate,
+            category: 'room',
+            source: 'booking',
+            refId: booking._id as any
+          });
+        }
+
+        const dealRate = month.rate * (1 - (month.dealDiscount || 0) / 100);
+        items.push({
+          description: `Room ${roomNumber} - ${dateRange} (${month.dealDays} night${month.dealDays > 1 ? 's' : ''} @ $${dealRate.toFixed(2)}, ${month.dealName})`,
+          qty: month.dealDays,
+          amount: month.dealDays * dealRate,
+          category: 'room',
+          source: 'booking',
+          refId: booking._id as any
+        });
+      } else {
+        // No deal applied for this month
+        items.push({
+          description: `Room ${roomNumber} - ${dateRange} (${month.days} night${month.days > 1 ? 's' : ''} @ $${month.rate.toFixed(2)})`,
+          qty: month.days,
+          amount: month.subtotal,
+          category: 'room',
+          source: 'booking',
+          refId: booking._id as any
+        });
+      }
+
+      // Move to next segment
+      segmentStart = new Date(segmentEnd);
+    });
+  } else {
+    // Fallback to simple calculation for old bookings without breakdown
+    if ((booking as any).roomId?.rate || (booking as any).appliedRate) {
+      const checkIn = new Date(booking.checkIn);
+      const checkOut = new Date(booking.checkOut);
+      const nights = Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)));
       const rate = (booking as any).appliedRate || (booking as any).roomId.rate;
       const roomTotal = (booking as any).roomTotal || rate * nights;
-    items.push({
-      description: `Room ${(booking as any).roomId.roomNumber || ''} (${nights} night${nights > 1 ? 's' : ''})`,
-      qty: 1,
+      items.push({
+        description: `Room ${(booking as any).roomId.roomNumber || ''} (${nights} night${nights > 1 ? 's' : ''})`,
+        qty: 1,
         amount: roomTotal,
-      category: 'room',
-      source: 'booking',
-      refId: booking._id as any
-    });
+        category: 'room',
+        source: 'booking',
+        refId: booking._id as any
+      });
+    }
   }
 
   const orders = await Order.find({ bookingId, status: { $ne: 'Cancelled' } }).lean();
@@ -95,7 +168,7 @@ invoicesRouter.post('/', requireRoles('admin', 'receptionist'), async (req: Requ
     }));
 
     let lineItems = [...autoItems, ...normalizedCustom];
-    
+
     // Add discount as line item if provided
     if (discountItem && discountItem.amount > 0) {
       lineItems.push({
@@ -108,15 +181,13 @@ invoicesRouter.post('/', requireRoles('admin', 'receptionist'), async (req: Requ
     }
 
     const subtotal = lineItems.reduce((sum: number, item: IInvoiceLineItem) => sum + (item.amount || 0), 0);
-    const tax = Math.max(0, (subtotal + (discountItem?.amount || 0)) * 0.10); // Tax on pre-discount amount
-    const total = subtotal + tax;
+    const total = subtotal;
 
     const newInvoice = await Invoice.create({
       bookingId,
       guestId: booking.guestId, // Link to guest automatically
       lineItems,
       subtotal,
-      tax,
       total,
       status: status || 'pending',
       paidAt: status === 'paid' ? new Date() : undefined
@@ -137,11 +208,11 @@ invoicesRouter.put('/:id', requireRoles('admin', 'receptionist'), async (req: Re
 
     // Only rebuild items if explicitly requested or if customItems/discountItem are provided
     const shouldRebuild = rebuildItems || customItems !== undefined || discountItem !== undefined;
-    
+
     if (shouldRebuild) {
       // Rebuild auto items to get latest room charges, orders, trips
       const autoItems = await buildAutoLineItems(invoice.bookingId.toString());
-      
+
       // Normalize custom items passed from frontend
       const customNormalized = (customItems || []).map((ci: any) => ({
         description: ci.description,
@@ -150,10 +221,10 @@ invoicesRouter.put('/:id', requireRoles('admin', 'receptionist'), async (req: Re
         category: ci.category || 'other',
         source: 'custom'
       }));
-      
+
       // Combine auto items with custom items
       let lineItems = [...autoItems, ...customNormalized];
-      
+
       // Add discount as line item if provided
       if (discountItem && discountItem.amount > 0) {
         lineItems.push({
@@ -166,21 +237,18 @@ invoicesRouter.put('/:id', requireRoles('admin', 'receptionist'), async (req: Re
       }
 
       const subtotal = lineItems.reduce((sum: number, item: any) => sum + (item.amount || 0), 0);
-      const preDiscountSubtotal = autoItems.concat(customNormalized).reduce((sum: number, item: any) => sum + (item.amount || 0), 0);
-      const tax = preDiscountSubtotal * 0.10;
-      const total = subtotal + tax;
+      const total = subtotal;
 
       invoice.lineItems = lineItems as any;
       invoice.subtotal = subtotal;
-      invoice.tax = tax;
       invoice.total = total;
     }
-    
+
     // Update status if provided
     if (status) invoice.status = status;
     if (status === 'paid' && !invoice.paidAt) {
       invoice.paidAt = new Date();
-      
+
       // Record revenue when invoice is paid
       const paidDate = new Date();
       try {
@@ -227,35 +295,35 @@ invoicesRouter.get('/revenue/:period', requireRoles('admin', 'manager'), async (
   try {
     const { period } = req.params;
     const { year, month, day } = req.query;
-    
+
     let filter: any = {};
-    
+
     if (period === 'daily' && year && month && day) {
-      filter = { 
-        year: parseInt(year as string), 
-        month: parseInt(month as string), 
-        day: parseInt(day as string) 
+      filter = {
+        year: parseInt(year as string),
+        month: parseInt(month as string),
+        day: parseInt(day as string)
       };
     } else if (period === 'monthly' && year && month) {
-      filter = { 
-        year: parseInt(year as string), 
-        month: parseInt(month as string) 
+      filter = {
+        year: parseInt(year as string),
+        month: parseInt(month as string)
       };
     } else if (period === 'yearly' && year) {
-      filter = { 
-        year: parseInt(year as string) 
+      filter = {
+        year: parseInt(year as string)
       };
     } else {
       return res.status(400).json({ error: 'Invalid period or missing parameters' });
     }
-    
+
     const revenues = await Revenue.find(filter)
       .populate('invoiceId')
       .populate('bookingId')
       .sort({ date: -1 });
-    
+
     const total = revenues.reduce((sum, rev) => sum + rev.amount, 0);
-    
+
     res.json({
       period,
       filter,

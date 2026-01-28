@@ -1,12 +1,12 @@
-import { Router, Request, Response } from 'express';
+import dayjs from 'dayjs';
+import { Request, Response, Router } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
-import { TripPackage } from '../models/tripPackage.js';
-import { TripRequest } from '../models/tripRequest.js';
-import { User } from '../models/user.js'; 
 import { Booking } from '../models/booking.js';
 import { Invoice } from '../models/invoice.js';
+import { TripPackage } from '../models/tripPackage.js';
+import { TripRequest } from '../models/tripRequest.js';
+import { User } from '../models/user.js';
 import { sendNotification } from '../services/notificationService.js';
-import dayjs from 'dayjs';
 
 export const tripsRouter = Router();
 tripsRouter.use(authenticate());
@@ -80,7 +80,7 @@ tripsRouter.get('/requests/mine', requireRoles('customer'), async (req: Request,
   try {
     const user = (req as any).user;
     const requests = await TripRequest.find({ requestedBy: user.mongoId })
-      .populate('packageId', 'name location price')
+      .populate('packageId', 'name location price images')
       .populate('bookingId', 'checkIn checkOut status')
       .sort({ createdAt: -1 })
       .lean();
@@ -176,7 +176,7 @@ tripsRouter.post('/requests', requireRoles('customer'), async (req: Request, res
     if (!isEligible) {
       return res.status(400).json({ error: 'Trip requests require a confirmed booking.' });
     }
-    
+
     let bookingData: any = {
       requestedBy: user.mongoId,
       bookingId,
@@ -186,28 +186,28 @@ tripsRouter.post('/requests', requireRoles('customer'), async (req: Request, res
     };
 
     if (packageId) {
-        // --- Standard Package Booking ---
-        const pkg = await TripPackage.findById(packageId);
-        if (!pkg) return res.status(404).json({ error: 'Package not found' });
+      // --- Standard Package Booking ---
+      const pkg = await TripPackage.findById(packageId);
+      if (!pkg) return res.status(404).json({ error: 'Package not found' });
 
-        bookingData.packageId = pkg._id;
-        bookingData.packageName = pkg.name;
-        bookingData.location = pkg.location;
-        bookingData.totalPrice = pkg.price * (participants || 1); // Estimated total
-        bookingData.tripDate = tripDate;
-        
-        // Append guest contact info to details if provided
-        if (guestInfo) {
-             const contactStr = `\n\nContact Info:\nName: ${guestInfo.fullName}\nPhone: ${guestInfo.phoneNumber}\nEmail: ${guestInfo.email}`;
-             bookingData.details += contactStr;
-        }
+      bookingData.packageId = pkg._id;
+      bookingData.packageName = pkg.name;
+      bookingData.location = pkg.location;
+      bookingData.totalPrice = pkg.price * (participants || 1); // Estimated total
+      bookingData.tripDate = tripDate;
+
+      // Append guest contact info to details if provided
+      if (guestInfo) {
+        const contactStr = `\n\nContact Info:\nName: ${guestInfo.fullName}\nPhone: ${guestInfo.phoneNumber}\nEmail: ${guestInfo.email}`;
+        bookingData.details += contactStr;
+      }
 
     } else {
-        // --- Custom Trip Request ---
-        bookingData.packageName = "Custom Trip Request";
-        bookingData.location = location || "Custom Destination";
-        bookingData.tripDate = tripDate; 
-        // totalPrice is left undefined/0 until admin reviews
+      // --- Custom Trip Request ---
+      bookingData.packageName = "Custom Trip Request";
+      bookingData.location = location || "Custom Destination";
+      bookingData.tripDate = tripDate;
+      // totalPrice is left undefined/0 until admin reviews
     }
 
     const created = await TripRequest.create(bookingData);
@@ -274,16 +274,16 @@ tripsRouter.patch('/requests/:id/status', requireRoles('admin', 'receptionist'),
     // Auto-add to existing invoice when trip is confirmed/approved and invoice exists
     if ((status === 'Confirmed' || status === 'Approved') && request.totalPrice) {
       try {
-        const invoice = await Invoice.findOne({ 
-          bookingId: (request.bookingId as any)._id || request.bookingId, 
-          status: { $ne: 'paid' } 
+        const invoice = await Invoice.findOne({
+          bookingId: (request.bookingId as any)._id || request.bookingId,
+          status: { $ne: 'paid' }
         });
         if (invoice) {
           // Check if this trip is already in the invoice
-          const existingTripItem = invoice.lineItems.find((item: any) => 
+          const existingTripItem = invoice.lineItems.find((item: any) =>
             item.source === 'trip' && item.refId?.toString() === (request._id as any).toString()
           );
-          
+
           if (!existingTripItem) {
             invoice.lineItems.push({
               description: `Trip: ${request.packageName || request.location || (request._id as any).toString().slice(-6)}`,
@@ -293,13 +293,13 @@ tripsRouter.patch('/requests/:id/status', requireRoles('admin', 'receptionist'),
               source: 'trip',
               refId: request._id as any
             });
-            
+
             // Recalculate totals
             const subtotal = invoice.lineItems.reduce((sum: number, item: any) => sum + (item.amount || 0), 0);
             invoice.subtotal = subtotal;
             invoice.tax = subtotal * 0.10;
             invoice.total = subtotal + invoice.tax;
-            
+
             await invoice.save();
           }
         }
@@ -348,11 +348,11 @@ tripsRouter.post('/requests/:id/cancel', requireRoles('admin', 'receptionist'), 
   try {
     const request = await TripRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ error: 'Trip request not found' });
-    
+
     request.status = 'Cancelled';
     if (req.body.responseNotes) request.responseNotes = req.body.responseNotes;
     await request.save();
-    
+
     // Notify customer about cancellation
     try {
       const guest = await User.findById(request.requestedBy);
@@ -370,7 +370,7 @@ tripsRouter.post('/requests/:id/cancel', requireRoles('admin', 'receptionist'), 
     } catch (notifyErr) {
       console.error('Trip cancellation notification failed', notifyErr);
     }
-    
+
     res.json({ message: 'Trip request cancelled', request });
   } catch (err) {
     console.error(err);

@@ -11,6 +11,7 @@ import { reportsRouter } from './reports.js';
 import { userRouter } from './user.js';
 import { settingsRouter } from './settings.js';
 import { dealsRouter } from './deals.js';
+import { feedbackRouter } from './feedback.js';
 
 export function registerRoutes(app: Express): void {
   app.get('/health', (_req: Request, res: Response) => {
@@ -28,5 +29,6 @@ export function registerRoutes(app: Express): void {
   app.use('/api/invoices', invoicesRouter);
   app.use('/api/reports', reportsRouter);
   app.use('/api/settings', settingsRouter);
+  app.use('/api/feedback', feedbackRouter);
   app.use('/api/deals', dealsRouter);
 }

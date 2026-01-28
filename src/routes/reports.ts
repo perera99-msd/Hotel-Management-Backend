@@ -1,13 +1,14 @@
-import { Router, Request, Response } from 'express';
-import { authenticate, requireRoles } from '../middleware/auth.js';
-import { Room } from '../models/room.js';
-import { Booking } from '../models/booking.js';
-import { Order } from '../models/order.js';
-import { Invoice } from '../models/invoice.js';
-import { InventoryItem } from '../models/inventoryItem.js';
-import { Deal } from '../models/deal.js';
-import { TripRequest } from '../models/tripRequest.js';
 import dayjs from 'dayjs';
+import { Request, Response, Router } from 'express';
+import { authenticate, requireRoles } from '../middleware/auth.js';
+import { Booking } from '../models/booking.js';
+import { Deal } from '../models/deal.js';
+import { Feedback } from '../models/feedback.js';
+import { InventoryItem } from '../models/inventoryItem.js';
+import { Invoice } from '../models/invoice.js';
+import { Order } from '../models/order.js';
+import { Room } from '../models/room.js';
+import { TripRequest } from '../models/tripRequest.js';
 
 export const reportsRouter = Router();
 reportsRouter.use(authenticate());
@@ -16,10 +17,10 @@ reportsRouter.use(authenticate());
 const convertToCSV = (data: any[], fields: string[]) => {
   if (!data || data.length === 0) return '';
   const header = fields.join(',') + '\n';
-  const rows = data.map(row => 
+  const rows = data.map(row =>
     fields.map(field => {
       const val = row[field] !== undefined ? row[field] : '';
-      return JSON.stringify(val); 
+      return JSON.stringify(val);
     }).join(',')
   );
   return header + rows.join('\n');
@@ -69,7 +70,8 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
       bookingsForStats,
       recentBookings,
       recentOrders,
-      recentTrips
+      recentTrips,
+      recentFeedback
     ] = await Promise.all([
       Booking.countDocuments({ checkIn: { $gte: todayStart, $lte: todayEnd }, status: { $in: ['Confirmed', 'CheckedIn'] } }),
       Booking.countDocuments({ checkOut: { $gte: todayStart, $lte: todayEnd }, status: { $in: ['CheckedIn', 'CheckedOut'] } }),
@@ -85,6 +87,7 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
       Booking.find().sort({ createdAt: -1 }).limit(5).populate('roomId', 'roomNumber').populate('guestId', 'name').lean(),
       Order.find().sort({ createdAt: -1 }).limit(5).lean(),
       TripRequest.find().sort({ createdAt: -1 }).limit(5).lean(),
+      Feedback.find().sort({ createdAt: -1 }).limit(1).populate('guestId', 'name').populate('bookingId', 'roomId').lean()
     ]);
 
     // Room metrics
@@ -196,6 +199,18 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
       .slice(0, 10)
       .map((item) => ({ ...item, time: dayjs(item.createdAt).toISOString() }));
 
+    // Format most recent feedback for dashboard
+    const feedbackData = recentFeedback.length > 0 ? recentFeedback.map((f: any) => {
+      const booking = f.bookingId;
+      const roomNumber = booking?.roomId?.roomNumber || booking?.roomId?.number || 'N/A';
+      return {
+        guest: f.guestId?.name || 'Unknown Guest',
+        comment: f.comment || f.title || 'No comment',
+        room: roomNumber,
+        rating: f.rating
+      };
+    }) : [];
+
     res.json({
       metrics: {
         todayCheckIns,
@@ -217,7 +232,7 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
         ],
       },
       occupancyData,
-      feedback: [],
+      feedback: feedbackData,
       recentActivity,
     });
 
@@ -236,7 +251,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
   try {
     const today = dayjs();
     const period = (req.query.period as string) || 'monthly';
-    
+
     let timeRangeStart: dayjs.Dayjs;
     let iterationUnit: 'day' | 'week' | 'month' | 'year';
     let labelFormat: string;
@@ -274,7 +289,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
     const rooms = await Room.find().lean();
     const totalRoomsCount = rooms.length;
     const roomMap = new Map(rooms.map(r => [r._id.toString(), r]));
-    
+
     // Fetch bookings that overlap with the time window
     const bookings = await Booking.find({
       $or: [
@@ -286,9 +301,20 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
       status: { $in: ['Confirmed', 'CheckedIn', 'CheckedOut'] }
     }).lean();
 
+    // Fetch invoices for actual revenue data
+    const invoices = await Invoice.find({
+      createdAt: { $gte: timeRangeStart.toDate() },
+      status: { $ne: 'Cancelled' }
+    }).populate('bookingId').lean();
+
     const orders = await Order.find({
       createdAt: { $gte: timeRangeStart.toDate() },
       status: { $ne: 'Cancelled' }
+    }).lean();
+
+    // Fetch feedback for ratings
+    const feedbackRecords = await Feedback.find({
+      createdAt: { $gte: timeRangeStart.toDate() }
     }).lean();
 
     const monthlyData = [];
@@ -308,7 +334,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
       bookings.forEach(b => {
         const bStart = dayjs(b.checkIn);
         const bEnd = dayjs(b.checkOut);
-        
+
         // Calculate overlap with this period
         const effectiveStart = bStart.isAfter(periodStart) ? bStart : periodStart;
         const effectiveEnd = bEnd.isBefore(periodEnd) ? bEnd : periodEnd;
@@ -316,12 +342,18 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
         if (effectiveEnd.isAfter(effectiveStart)) {
           const nights = effectiveEnd.diff(effectiveStart, 'day');
           const room = roomMap.get((b.roomId as any).toString());
-          
+
           if (room) {
             occupiedNights += nights;
-            // Revenue Attribution: (Nightly Rate * Nights in this period)
-            monthRoomRevenue += (room.rate * nights);
           }
+        }
+      });
+
+      // Calculate ACTUAL revenue from invoices for this period
+      invoices.forEach((inv: any) => {
+        const invDate = dayjs(inv.createdAt);
+        if (invDate.isAfter(periodStart) && invDate.isBefore(periodEnd)) {
+          monthRoomRevenue += inv.total || 0;
         }
       });
 
@@ -343,18 +375,19 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
       currentIterTime = currentIterTime.add(1, iterationUnit);
     }
 
-    // Room Type Distribution Stats
+    // Room Type Distribution Stats - Use actual invoice data
     const roomTypeStats: Record<string, { value: number, revenue: number }> = {};
-    bookings.forEach(b => {
-      const room = roomMap.get((b.roomId as any).toString());
-      if (room) {
-         // Calculate total value of booking (approximate based on current rate if totalAmount missing)
-         const nights = Math.max(1, dayjs(b.checkOut).diff(dayjs(b.checkIn), 'day'));
-         const val = (b as any).totalAmount || (room.rate * nights);
-         
-         if (!roomTypeStats[room.type]) roomTypeStats[room.type] = { value: 0, revenue: 0 };
-         roomTypeStats[room.type].value += 1;
-         roomTypeStats[room.type].revenue += val;
+
+    invoices.forEach((inv: any) => {
+      const booking = inv.bookingId;
+      if (booking && booking.roomId) {
+        const roomId = typeof booking.roomId === 'object' ? booking.roomId._id?.toString() : booking.roomId.toString();
+        const room = roomMap.get(roomId);
+        if (room) {
+          if (!roomTypeStats[room.type]) roomTypeStats[room.type] = { value: 0, revenue: 0 };
+          roomTypeStats[room.type].value += 1;
+          roomTypeStats[room.type].revenue += inv.total || 0;
+        }
       }
     });
 
@@ -370,7 +403,7 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
       const day = today.subtract(i, 'day');
       const dayStart = day.startOf('day');
       const dayEnd = day.endOf('day');
-      
+
       const occupiedCount = bookings.filter(b => {
         const start = dayjs(b.checkIn);
         const end = dayjs(b.checkOut);
@@ -389,8 +422,8 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
     const totalRev = totalRoomRev + totalFnBRev;
 
     const revenueSources = [
-      { name: "Room Revenue", value: totalRoomRev, percentage: totalRev ? Math.round((totalRoomRev/totalRev)*100) : 0 },
-      { name: "Food & Beverage", value: totalFnBRev, percentage: totalRev ? Math.round((totalFnBRev/totalRev)*100) : 0 },
+      { name: "Room Revenue", value: totalRoomRev, percentage: totalRev ? Math.round((totalRoomRev / totalRev) * 100) : 0 },
+      { name: "Food & Beverage", value: totalFnBRev, percentage: totalRev ? Math.round((totalFnBRev / totalRev) * 100) : 0 },
     ];
 
     const currentMonthData = monthlyData[monthlyData.length - 1];
@@ -400,19 +433,38 @@ reportsRouter.get('/analytics', requireRoles('admin', 'receptionist'), async (re
       return (((current - prev) / prev) * 100).toFixed(1);
     };
 
+    // Calculate average rating from actual feedback
+    const avgRating = feedbackRecords.length > 0
+      ? (feedbackRecords.reduce((sum, f: any) => sum + f.rating, 0) / feedbackRecords.length).toFixed(1)
+      : "0.0";
+
     const metrics = {
       occupancyRate: currentMonthData.occupancy,
       occupancyChange: calculateChange(currentMonthData.occupancy, prevMonthData.occupancy),
       revenue: currentMonthData.revenue,
       revenueChange: calculateChange(currentMonthData.revenue, prevMonthData.revenue),
       totalRooms: totalRoomsCount,
-      avgRating: 4.8 // Fallback as Feedback model is not yet implemented
+      avgRating: parseFloat(avgRating)
     };
 
-    const guestSatisfaction = monthlyData.map(m => ({
+    // Guest Satisfaction by Month - Use real feedback data
+    const feedbackByMonth: Record<string, number[]> = {};
+    feedbackRecords.forEach((f: any) => {
+      const monthKey = dayjs(f.createdAt).format(labelFormat);
+      if (!feedbackByMonth[monthKey]) feedbackByMonth[monthKey] = [];
+      feedbackByMonth[monthKey].push(f.rating);
+    });
+
+    const guestSatisfaction = monthlyData.map(m => {
+      const ratings = feedbackByMonth[m.name] || [];
+      const avgMonthRating = ratings.length > 0
+        ? ratings.reduce((sum, r) => sum + r, 0) / ratings.length
+        : 0;
+      return {
         month: m.name,
-        rating: 4.0 + (Math.random() * 1) // Mock data until Feedback module is active
-    }));
+        rating: parseFloat(avgMonthRating.toFixed(1))
+      };
+    });
 
     res.json({ metrics, occupancyData: monthlyData, roomTypeData, revenueSources, dailyOccupancy, guestSatisfaction });
 
@@ -437,13 +489,13 @@ reportsRouter.get('/export/:type', requireRoles('admin', 'receptionist'), async 
     if (type === 'occupancy') {
       fields = ['Date', 'TotalRooms', 'Occupied', 'OccupancyRate'];
       const totalRooms = await Room.countDocuments();
-      
+
       // Last 30 Days
       for (let i = 0; i < 30; i++) {
         const date = today.subtract(i, 'day');
         const start = date.startOf('day').toDate();
         const end = date.endOf('day').toDate();
-        
+
         const occupied = await Booking.countDocuments({
           checkIn: { $lte: end },
           checkOut: { $gte: start },
@@ -460,29 +512,29 @@ reportsRouter.get('/export/:type', requireRoles('admin', 'receptionist'), async 
 
     } else if (type === 'revenue') {
       fields = ['Month', 'RoomRevenue', 'FoodAndBevRevenue', 'TotalRevenue'];
-      
+
       // Last 6 Months
       for (let i = 0; i < 6; i++) {
         const date = today.subtract(i, 'month');
         const start = date.startOf('month');
         const end = date.endOf('month');
-        
+
         // Find bookings that CHECKED OUT in this month (Realized Revenue)
-        const bookings = await Booking.find({ 
-            checkOut: { $gte: start.toDate(), $lte: end.toDate() }, 
-            status: { $in: ['CheckedOut', 'CheckedIn'] } 
+        const bookings = await Booking.find({
+          checkOut: { $gte: start.toDate(), $lte: end.toDate() },
+          status: { $in: ['CheckedOut', 'CheckedIn'] }
         }).populate('roomId');
-        
+
         // Calculate Revenue: Use totalAmount if exists, else (nights * rate)
         const roomRev = bookings.reduce((sum, b: any) => {
-             const nights = dayjs(b.checkOut).diff(dayjs(b.checkIn), 'day') || 1;
-             const amount = b.totalAmount || ((b.roomId?.rate || 0) * nights);
-             return sum + amount;
+          const nights = dayjs(b.checkOut).diff(dayjs(b.checkIn), 'day') || 1;
+          const amount = b.totalAmount || ((b.roomId?.rate || 0) * nights);
+          return sum + amount;
         }, 0);
-        
-        const orders = await Order.find({ 
-            createdAt: { $gte: start.toDate(), $lte: end.toDate() }, 
-            status: { $ne: 'Cancelled' } 
+
+        const orders = await Order.find({
+          createdAt: { $gte: start.toDate(), $lte: end.toDate() },
+          status: { $ne: 'Cancelled' }
         });
         const fnbRev = orders.reduce((sum, o) => sum + o.totalAmount, 0);
 
@@ -519,7 +571,7 @@ reportsRouter.get('/export/:type', requireRoles('admin', 'receptionist'), async 
         Status: inv.status
       }));
     } else {
-        return res.status(400).json({ error: "Invalid report type" });
+      return res.status(400).json({ error: "Invalid report type" });
     }
 
     const csv = convertToCSV(data, fields);

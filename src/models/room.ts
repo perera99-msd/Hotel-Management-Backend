@@ -2,7 +2,7 @@
 import mongoose, { Document, Model, Schema } from 'mongoose';
 
 export type RoomType = 'single' | 'double' | 'suite' | 'family';
-export type RoomStatus = 'Available' | 'Occupied' | 'Reserved' | 'Cleaning' | 'Maintenance';
+export type RoomStatus = 'Available' | 'Reserved' | 'Occupied' | 'Needs Cleaning' | 'Maintenance' | 'Out of Order';
 export type RoomTier = 'Deluxe' | 'Normal';
 
 export interface IRoom extends Document {
@@ -16,6 +16,7 @@ export interface IRoom extends Document {
   status: RoomStatus;
   floor: number;        // ✅ Added
   maxOccupancy: number; // ✅ Added
+  images: string[];     // ✅ Room images (Max 4 URLs)
 }
 
 const RoomSchema = new Schema<IRoom>(
@@ -34,11 +35,21 @@ const RoomSchema = new Schema<IRoom>(
     amenities: { type: [String], default: [] },
     status: {
       type: String,
-      enum: ['Available', 'Occupied', 'Reserved', 'Cleaning', 'Maintenance'],
+      enum: ['Available', 'Reserved', 'Occupied', 'Needs Cleaning', 'Maintenance', 'Out of Order'],
       default: 'Available'
     },
     floor: { type: Number, required: true, default: 0 },         // ✅ Added (required)
     maxOccupancy: { type: Number, default: 2 },  // ✅ Added
+    images: {
+      type: [String],
+      default: [],
+      validate: {
+        validator: function (v: string[]) {
+          return v.length <= 4;
+        },
+        message: 'Room can have maximum 4 images'
+      }
+    }
   },
   { timestamps: true }
 );

@@ -1,5 +1,5 @@
 /* */
-import mongoose, { Schema, Document, Types } from 'mongoose';
+import mongoose, { Document, Schema, Types } from 'mongoose';
 
 export interface IDeal extends Document {
   referenceNumber: string;
@@ -13,6 +13,7 @@ export interface IDeal extends Document {
   discount: number;
   description?: string;
   tags?: string[];
+  image?: string; // ✅ Single image
   createdAt: Date;
   updatedAt: Date;
 }
@@ -25,15 +26,16 @@ const DealSchema = new Schema<IDeal>(
     endDate: { type: String, required: true },
     roomType: { type: [String], required: true },
     roomIds: { type: [Schema.Types.ObjectId], ref: 'Room', required: true }, // Required: deals must target specific rooms
-    status: { 
-      type: String, 
-      enum: ['Ongoing', 'Full', 'Inactive', 'New', 'Finished'], 
-      default: 'New' 
+    status: {
+      type: String,
+      enum: ['Ongoing', 'Full', 'Inactive', 'New', 'Finished'],
+      default: 'New'
     },
     price: { type: Number, default: 0 }, // Optional: calculated from monthly rate + discount
     discount: { type: Number, default: 0, required: true }, // Discount % applied to monthly rate
     description: { type: String },
     tags: { type: [String] },
+    image: { type: String }, // ✅ Single image URL
   },
   { timestamps: true }
 );

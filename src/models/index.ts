@@ -7,6 +7,7 @@ export * from './inventoryItem.js';
 export * from './tripPackage.js';
 export * from './tripRequest.js';
 export * from './invoice.js';
+export * from './feedback.js';
 export * from './auditLog.js';
 export * from './revenue.js';
 

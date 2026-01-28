@@ -1,6 +1,7 @@
-import { Router, Request, Response } from 'express';
+import { Request, Response, Router } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
-import { Room, IRoom, RoomStatus, RoomType } from '../models/room.js';
+import { Booking } from '../models/booking.js';
+import { IRoom, Room, RoomStatus, RoomType } from '../models/room.js';
 
 export const roomsRouter = Router();
 
@@ -21,7 +22,7 @@ roomsRouter.get('/', async (req: Request, res: Response) => {
     // Handle 'All' filter from frontend if necessary
     if (status && status !== 'All' as any) filter.status = status;
     if (type && type !== 'All' as any) filter.type = type;
-    
+
     if (minRate || maxRate) {
       filter.rate = {};
       if (minRate) filter.rate.$gte = Number(minRate);
@@ -29,14 +30,56 @@ roomsRouter.get('/', async (req: Request, res: Response) => {
     }
 
     const rooms = await Room.find(filter).sort({ roomNumber: 1 }).lean();
-    
-    // Map _id to id for frontend compatibility
-    const mappedRooms = rooms.map(room => ({
-      ...room,
-      id: room._id.toString()
-    }));
 
-    res.json(mappedRooms);
+    // Smart Room Status Logic: Compute status based on bookings
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const roomsWithComputedStatus = await Promise.all(
+      rooms.map(async (room) => {
+        let computedStatus = room.status;
+
+        // 1. Check if room is Occupied (has a Checked In booking)
+        const occupiedBooking = await Booking.findOne({
+          roomId: room._id,
+          status: 'CheckedIn'
+        }).lean();
+
+        if (occupiedBooking) {
+          computedStatus = 'Occupied' as RoomStatus;
+        } else {
+          // 2. Check if room is Reserved today (has a Confirmed booking for today)
+          const reservedBooking = await Booking.findOne({
+            roomId: room._id,
+            status: 'Confirmed',
+            checkIn: { $lte: todayEnd },
+            checkOut: { $gte: todayStart }
+          }).lean();
+
+          if (reservedBooking) {
+            // If a confirmed booking exists for today, show Reserved
+            computedStatus = 'Reserved' as RoomStatus;
+          } else if (room.status === 'Reserved') {
+            // No confirmed booking anymore (cancelled), revert to Available
+            computedStatus = 'Available' as RoomStatus;
+          } else if (room.status === 'Needs Cleaning') {
+            // Keep as Needs Cleaning
+            computedStatus = 'Needs Cleaning' as RoomStatus;
+          }
+          // Otherwise, keep the database status (Available, Maintenance, Out of Order)
+        }
+
+        return {
+          ...room,
+          id: room._id.toString(),
+          computedStatus
+        };
+      })
+    );
+
+    res.json(roomsWithComputedStatus);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch rooms' });
   }
@@ -46,7 +89,7 @@ roomsRouter.get('/', async (req: Request, res: Response) => {
 roomsRouter.get('/available', async (req: Request, res: Response) => {
   try {
     console.log('[ROOMS/AVAILABLE] Request received:', { query: req.query });
-    
+
     const { checkIn, checkOut, type } = req.query as { checkIn?: string; checkOut?: string; type?: RoomType };
     if (!checkIn || !checkOut) {
       console.error('[ROOMS/AVAILABLE] Missing date parameters:', { checkIn, checkOut });
@@ -143,6 +186,12 @@ roomsRouter.post('/', requireRoles('admin'), async (req: Request, res: Response)
 roomsRouter.put('/:id', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const payload = req.body as Partial<IRoom>;
+
+    // If base rate is being changed, reset all monthly rates to new base rate
+    if (payload.rate !== undefined) {
+      payload.monthlyRates = Array(12).fill(payload.rate);
+    }
+
     const room = await Room.findByIdAndUpdate(req.params.id, payload, { new: true });
     if (!room) return res.status(404).json({ error: 'Room not found' });
     res.json({ ...room.toObject(), id: room._id });
