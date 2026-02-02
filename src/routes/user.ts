@@ -16,10 +16,10 @@ export const userRouter = Router();
  */
 userRouter.post('/register', async (req: Request, res: Response) => {
   try {
-    const { uid, email, name, phone } = req.body;
+    const { uid, email, name, phone, idNumber } = req.body;
 
-    if (!uid || !email) {
-      return res.status(400).json({ error: 'UID and Email are required' });
+    if (!uid || !email || !idNumber) {
+      return res.status(400).json({ error: 'UID, Email, and NIC/Passport Number are required' });
     }
 
     const targetEmail = email.toLowerCase();
@@ -33,6 +33,7 @@ userRouter.post('/register', async (req: Request, res: Response) => {
       user.uid = uid;
       if (name) user.name = name;
       if (phone) user.phone = phone;
+      user.idNumber = idNumber;
       await user.save();
       return res.status(200).json({ message: 'Profile linked and registration complete', user });
     }
@@ -43,6 +44,7 @@ userRouter.post('/register', async (req: Request, res: Response) => {
       email: targetEmail,
       name: name || 'New User',
       phone: phone || '',
+      idNumber: idNumber,
       roles: ['customer'],
       status: 'active'
     });
@@ -95,11 +97,11 @@ userRouter.get('/me', async (req: Request, res: Response) => {
 userRouter.put('/me', async (req: Request, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-    const { name, phone } = req.body;
+    const { name, phone, idNumber } = req.body;
 
     const user = await User.findOneAndUpdate(
       { uid: req.user.uid },
-      { name, phone },
+      { name, phone, idNumber },
       { new: true }
     );
 
@@ -135,6 +137,10 @@ userRouter.post('/guest', requireRoles('admin', 'receptionist', 'manager'), asyn
 
     if (!email || !name) {
       return res.status(400).json({ error: "Name and Email are required" });
+    }
+
+    if (!idNumber) {
+      return res.status(400).json({ error: "NIC/Passport Number is required" });
     }
 
     if (!password || password.length < 6) {
@@ -205,7 +211,7 @@ userRouter.post('/guest', requireRoles('admin', 'receptionist', 'manager'), asyn
  */
 userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
-    const { email, name, phone, role, password } = req.body;
+    const { email, name, phone, role, password, idNumber } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
@@ -241,6 +247,7 @@ userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Resp
         email: email.toLowerCase(),
         name,
         phone: phone || '',
+        idNumber: idNumber || undefined,
         roles: [role || 'customer'],
         status: 'active'
       },
@@ -260,10 +267,10 @@ userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Resp
  */
 userRouter.put('/:id', requireRoles('admin'), async (req: Request, res: Response) => {
   try {
-    const { name, role, status, phone } = req.body;
+    const { name, role, status, phone, idNumber } = req.body;
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { name, roles: [role], status, phone },
+      { name, roles: [role], status, phone, idNumber },
       { new: true }
     );
     res.json(user);
