@@ -6,7 +6,7 @@ import { Invoice } from '../models/invoice.js';
 import { TripPackage } from '../models/tripPackage.js';
 import { TripRequest } from '../models/tripRequest.js';
 import { User } from '../models/user.js';
-import { sendNotification } from '../services/notificationService.js';
+import { notifyTripRequestConfirmed, notifyTripRequestCreated, sendNotification } from '../services/notificationService.js';
 
 export const tripsRouter = Router();
 tripsRouter.use(authenticate());
@@ -216,29 +216,20 @@ tripsRouter.post('/requests', requireRoles('customer'), async (req: Request, res
       const userCtx = (req as any).user;
       const guest = userCtx?.mongoId ? await User.findById(userCtx.mongoId) : null;
       const requesterName = guest?.name || userCtx?.email || 'Guest';
-      const tripDateLabel = bookingData.tripDate ? dayjs(bookingData.tripDate).format('MMM D, YYYY') : 'Flexible date';
 
-      await sendNotification({
-        type: 'TRIP',
-        title: 'New trip request',
-        message: `${requesterName} requested a trip for ${tripDateLabel}. Package: ${bookingData.packageName || bookingData.location || 'Custom trip'}.`,
-        targetRoles: ['admin', 'receptionist', 'manager'],
-        data: { tripRequestId: (created as any)._id.toString(), bookingId },
-      });
-
-      await sendNotification({
-        type: 'TRIP',
-        title: 'Trip request submitted',
-        message: `Hi ${requesterName}, your trip request for ${tripDateLabel} has been submitted. We will review and confirm soon.`,
-        recipientEmail: guest?.email,
-        recipientPhone: guest?.phone,
-        targetRoles: ['customer'],
-        userId: guest?._id?.toString() || userCtx?.mongoId,
-        notifyAdmin: false,
-        data: { tripRequestId: (created as any)._id.toString(), status: created.status }
+      // Use specialized trip request created notification
+      await notifyTripRequestCreated({
+        requestId: (created as any)._id.toString(),
+        guestId: guest?._id?.toString() || userCtx?.mongoId,
+        guestName: requesterName,
+        location: bookingData.location || bookingData.packageName || 'Custom location',
+        tripDate: bookingData.tripDate || new Date(),
+        participants: bookingData.participants || 1,
+        totalPrice: bookingData.totalPrice,
+        details: bookingData.details,
       });
     } catch (notifyErr) {
-      console.error('Trip request notification failed', notifyErr);
+      console.error('❌ [Trip Request Notification Failed]', notifyErr);
     }
 
     res.status(201).json(created);
@@ -308,32 +299,25 @@ tripsRouter.patch('/requests/:id/status', requireRoles('admin', 'receptionist'),
       }
     }
 
-    // Notify customer about the status change. For Approved we only send in-app.
+    // Notify customer about the status change (only when Confirmed)
     try {
       const guest = await User.findById(request.requestedBy);
-      const tripDateLabel = request.tripDate ? dayjs(request.tripDate).format('MMM D, YYYY') : 'your requested date';
-      const baseMessage = `Your trip request for ${request.packageName || request.location || 'Trip'} is now ${status}.`;
-      const message = status === 'Approved'
-        ? `Good news! Your trip for ${tripDateLabel} is approved. We are finalizing arrangements.`
-        : responseNotes
-          ? `${baseMessage} Notes: ${responseNotes}`
-          : baseMessage;
 
-      const shouldSendEmailSms = status !== 'Approved';
-
-      await sendNotification({
-        type: 'TRIP',
-        title: `Trip ${status}`,
-        message,
-        targetRoles: ['customer'],
-        userId: request.requestedBy.toString(),
-        recipientEmail: shouldSendEmailSms ? guest?.email : undefined,
-        recipientPhone: shouldSendEmailSms ? guest?.phone : undefined,
-        notifyAdmin: false,
-        data: { tripRequestId: (request as any)._id.toString(), status }
-      });
+      if ((status === 'Confirmed' || status === 'Approved') && guest) {
+        // Use specialized trip confirmed notification
+        await notifyTripRequestConfirmed({
+          requestId: (request as any)._id.toString(),
+          guestId: (guest as any)._id.toString(),
+          guestName: guest.name,
+          location: request.location || request.packageName || 'Trip',
+          tripDate: request.tripDate || new Date(),
+          participants: request.participants || 1,
+          totalPrice: request.totalPrice,
+          details: responseNotes,
+        });
+      }
     } catch (notifyErr) {
-      console.error('Trip status notification failed', notifyErr);
+      console.error('❌ [Trip Confirmation Notification Failed]', notifyErr);
     }
 
     res.json(request);

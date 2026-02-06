@@ -6,7 +6,7 @@ import { Invoice } from '../models/invoice.js';
 import { MenuItem } from '../models/menuItem.js';
 import { IOrderItem, Order } from '../models/order.js';
 import { Room } from '../models/room.js';
-import { sendNotification } from '../services/notificationService.js';
+import { notifyOrderCreated, notifyOrderReady } from '../services/notificationService.js';
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate());
@@ -155,43 +155,24 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
       placedBy: user.mongoId,
     });
 
-    // --- 🔔 NOTIFICATION TRIGGER ---
+    // --- 🔔 NOTIFICATION TRIGGER (Order Created) ---
     try {
-      const location = roomNumber ? `Room ${roomNumber}` : tableNumber ? `Table ${tableNumber}` : `Guest ${finalGuestName}`;
-      const guestEmail = (booking.guestId as any)?.email || user.email;
       const guestPhone = (booking.guestId as any)?.phone || (user as any).phone;
-      const itemSummary = orderItems.map((i) => `${i.quantity} x ${i.name}`).join(', ');
 
-      const staffMessage = `New order placed for ${location}.\nItems: ${itemSummary || 'See order'}\nTotal: $${totalAmount.toFixed(2)}`;
-
-      // 1. Notify Admin/Kitchen/Reception via dashboard
-      await sendNotification({
-        type: 'ORDER',
-        title: 'New Kitchen Order',
-        message: staffMessage,
-        targetRoles: ['admin', 'receptionist', 'manager', 'kitchen'],
-        data: {
-          orderId: (order._id as Types.ObjectId).toString(),
-          location: location
-        }
+      // Use specialized order notification
+      await notifyOrderCreated({
+        orderId: (order._id as Types.ObjectId).toString(),
+        guestId: guestId?.toString() || user.mongoId,
+        guestName: finalGuestName,
+        guestPhone,
+        roomNumber: resolvedRoomNumber,
+        items: orderItems,
+        totalAmount,
+        specialNotes,
       });
-
-      // 2. Notify customer via email/SMS and dashboard (no staff duplication)
-      if (!isStaff && guestEmail) {
-        await sendNotification({
-          type: 'ORDER',
-          title: 'We received your order',
-          message: `Hi ${finalGuestName}, we received your dining order for ${location}.\nItems: ${itemSummary || 'See order details'}.\nTotal: $${totalAmount.toFixed(2)}. We will let you know once it is ready.`,
-          recipientEmail: guestEmail,
-          recipientPhone: guestPhone,
-          targetRoles: ['customer'],
-          userId: user.mongoId,
-          notifyAdmin: false,
-          data: { orderId: (order._id as Types.ObjectId).toString(), status: 'Preparing' }
-        });
-      }
     } catch (notifErr) {
-      console.error("Failed to send order notification", notifErr);
+      console.error("❌ [Order Notification Failed]", notifErr);
+      // Don't let notification errors block the response
     }
 
     // Auto-add to existing invoice if it exists and is not paid
@@ -233,21 +214,18 @@ ordersRouter.patch('/:id/status', requireRoles('kitchen', 'receptionist', 'admin
     const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    // Notify customer when order is ready (in-app only)
+    // Notify customer when order is ready (in-app notification only, no email/SMS)
     if (status === 'Ready' && order.guestId) {
       try {
-        const location = order.roomNumber ? `Room ${order.roomNumber}` : order.tableNumber ? `Table ${order.tableNumber}` : 'your room';
-        await sendNotification({
-          type: 'ORDER',
-          title: 'Order ready',
-          message: `Hi ${order.guestName || 'guest'}, your order for ${location} is ready and will be served shortly.`,
-          targetRoles: ['customer'],
-          userId: (order.guestId as Types.ObjectId).toString(),
-          notifyAdmin: false,
-          data: { orderId: (order as any)._id.toString(), status: order.status },
-        });
+        await notifyOrderReady(
+          (order._id as Types.ObjectId).toString(),
+          (order.guestId as Types.ObjectId).toString(),
+          order.guestName || 'Guest',
+          order.roomNumber || 'N/A'
+        );
       } catch (notifyErr) {
-        console.error('Failed to send order ready notification', notifyErr);
+        console.error('❌ [Order Ready Notification Failed]', notifyErr);
+        // Don't let notification errors block the response
       }
     }
     res.json(order);

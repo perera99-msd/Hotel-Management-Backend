@@ -5,6 +5,7 @@ import { IInvoiceLineItem, Invoice } from '../models/invoice.js';
 import { Order } from '../models/order.js';
 import { Revenue } from '../models/revenue.js';
 import { TripRequest } from '../models/tripRequest.js';
+import { notifyBillPaid } from '../services/notificationService.js';
 
 export const invoicesRouter = Router();
 invoicesRouter.use(authenticate());
@@ -263,6 +264,23 @@ invoicesRouter.put('/:id', requireRoles('admin', 'receptionist'), async (req: Re
         });
       } catch (revenueErr) {
         console.error('Failed to record revenue:', revenueErr);
+      }
+
+      // 🔔 Notify customer about bill payment
+      try {
+        const booking = await Booking.findById(invoice.bookingId).populate('guestId');
+        const guest = booking?.guestId as any;
+
+        if (guest) {
+          await notifyBillPaid(
+            guest._id.toString(),
+            guest.name,
+            (invoice._id as any).toString(),
+            invoice.total
+          );
+        }
+      } catch (notifyErr) {
+        console.error('❌ [Bill Payment Notification Failed]', notifyErr);
       }
     }
     if (status && status !== 'paid') invoice.paidAt = undefined;

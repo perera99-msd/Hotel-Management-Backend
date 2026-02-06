@@ -94,18 +94,23 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
     const totalRooms = rooms.length;
     const availableCount = rooms.filter((r) => r.status === 'Available').length;
     const occupiedCount = rooms.filter((r) => r.status === 'Occupied').length;
-    // ✅ FIX: Added type cast to allow "Cleaning" status comparison during strict build
-    const cleaningCount = rooms.filter((r) => (r.status as any) === 'Cleaning').length;
+    const needsCleaningCount = rooms.filter((r) => r.status === 'Needs Cleaning').length;
     const maintenanceCount = rooms.filter((r) => r.status === 'Maintenance').length;
     const reservedCount = rooms.filter((r) => r.status === 'Reserved').length;
+    const outOfOrderCount = rooms.filter((r) => r.status === 'Out of Order').length;
 
-    const statusBreakdown = {
-      occupied: { clean: occupiedCount, dirty: 0, inspected: 0 },
-      available: { clean: availableCount, dirty: cleaningCount, inspected: maintenanceCount + reservedCount },
+    // Real room status breakdown
+    const roomStatusBreakdown = {
+      available: availableCount,
+      occupied: occupiedCount,
+      reserved: reservedCount,
+      needsCleaning: needsCleaningCount,
+      maintenance: maintenanceCount,
+      outOfOrder: outOfOrderCount,
     };
 
     const floorCompletion = totalRooms > 0
-      ? Math.round(((totalRooms - cleaningCount - maintenanceCount) / totalRooms) * 100)
+      ? Math.round(((totalRooms - needsCleaningCount - maintenanceCount) / totalRooms) * 100)
       : 100;
 
     // Room type metrics + deal overlays
@@ -221,10 +226,7 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
         totalOccupiedRoom: occupiedCount,
       },
       roomTypes: roomTypesData,
-      roomStatus: {
-        occupied: { occupied: occupiedCount, ...statusBreakdown.occupied },
-        available: { occupied: availableCount, ...statusBreakdown.available },
-      },
+      roomStatus: roomStatusBreakdown,
       floorStatus: {
         percentage: floorCompletion,
         status: [
@@ -240,6 +242,180 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
   } catch (err) {
     console.error("Dashboard Stats Error:", err);
     res.status(500).json({ error: 'Failed to generate dashboard data' });
+  }
+});
+
+/**
+ * GET /api/reports/occupancy?range=weekly|monthly|yearly
+ * Returns occupancy statistics for different time ranges
+ */
+reportsRouter.get('/occupancy', requireRoles('admin', 'manager', 'receptionist'), async (req: Request, res: Response) => {
+  try {
+    const range = (req.query.range as string) || 'monthly';
+    const today = dayjs();
+
+    const rooms = await Room.find().lean();
+    const totalRooms = Math.max(rooms.length, 1);
+
+    let occupancyData: { name: string; percentage: number }[] = [];
+
+    if (range === 'weekly') {
+      // Last 7 days
+      for (let i = 6; i >= 0; i--) {
+        const day = today.subtract(i, 'day');
+        const dayStart = day.startOf('day').toDate();
+        const dayEnd = day.endOf('day').toDate();
+
+        const occupiedRooms = await Booking.countDocuments({
+          status: { $in: ['Confirmed', 'CheckedIn'] },
+          checkIn: { $lte: dayEnd },
+          checkOut: { $gte: dayStart }
+        });
+
+        occupancyData.push({
+          name: day.format('ddd'),
+          percentage: Math.min(100, Math.round((occupiedRooms / totalRooms) * 100))
+        });
+      }
+    } else if (range === 'yearly') {
+      // Last 6 years
+      for (let i = 5; i >= 0; i--) {
+        const year = today.subtract(i, 'year');
+        const yearStart = year.startOf('year');
+        const yearEnd = year.endOf('year');
+        // Calculate days in year (365 or 366 for leap year)
+        const yearNumber = year.year();
+        const daysInYear = (yearNumber % 4 === 0 && yearNumber % 100 !== 0) || (yearNumber % 400 === 0) ? 366 : 365;
+        const capacity = totalRooms * daysInYear;
+        let occupiedNights = 0;
+
+        const yearBookings = await Booking.find({
+          status: { $in: ['Confirmed', 'CheckedIn', 'CheckedOut'] },
+          checkOut: { $gte: yearStart.toDate() },
+          checkIn: { $lte: yearEnd.toDate() }
+        }).lean();
+
+        yearBookings.forEach((b: any) => {
+          const start = dayjs(b.checkIn);
+          const end = dayjs(b.checkOut);
+          const effectiveStart = start.isAfter(yearStart) ? start : yearStart;
+          const effectiveEnd = end.isBefore(yearEnd) ? end : yearEnd;
+          if (effectiveEnd.isAfter(effectiveStart)) {
+            const nights = effectiveEnd.diff(effectiveStart, 'day') || 1;
+            occupiedNights += nights;
+          }
+        });
+
+        occupancyData.push({
+          name: year.format('YYYY'),
+          percentage: capacity ? Math.min(100, Math.round((occupiedNights / capacity) * 100)) : 0
+        });
+      }
+    } else {
+      // Monthly (last 6 months) - default
+      for (let i = 5; i >= 0; i--) {
+        const month = today.subtract(i, 'month');
+        const monthStart = month.startOf('month');
+        const monthEnd = month.endOf('month');
+        const capacity = totalRooms * month.daysInMonth();
+        let occupiedNights = 0;
+
+        const monthBookings = await Booking.find({
+          status: { $in: ['Confirmed', 'CheckedIn', 'CheckedOut'] },
+          checkOut: { $gte: monthStart.toDate() },
+          checkIn: { $lte: monthEnd.toDate() }
+        }).lean();
+
+        monthBookings.forEach((b: any) => {
+          const start = dayjs(b.checkIn);
+          const end = dayjs(b.checkOut);
+          const effectiveStart = start.isAfter(monthStart) ? start : monthStart;
+          const effectiveEnd = end.isBefore(monthEnd) ? end : monthEnd;
+          if (effectiveEnd.isAfter(effectiveStart)) {
+            const nights = effectiveEnd.diff(effectiveStart, 'day') || 1;
+            occupiedNights += nights;
+          }
+        });
+
+        occupancyData.push({
+          name: month.format('MMM'),
+          percentage: capacity ? Math.min(100, Math.round((occupiedNights / capacity) * 100)) : 0
+        });
+      }
+    }
+
+    res.json({ occupancyData });
+  } catch (err) {
+    console.error("Occupancy Stats Error:", err);
+    res.status(500).json({ error: 'Failed to get occupancy statistics' });
+  }
+});
+
+/**
+ * GET /api/reports/available-floors
+ * Returns list of floors that have rooms
+ */
+reportsRouter.get('/available-floors', requireRoles('admin', 'manager', 'receptionist'), async (_req: Request, res: Response) => {
+  try {
+    const floors = await Room.distinct('floor');
+    const sortedFloors = floors.sort((a, b) => a - b);
+    res.json({ floors: sortedFloors });
+  } catch (err) {
+    console.error("Available Floors Error:", err);
+    res.status(500).json({ error: 'Failed to get available floors' });
+  }
+});
+
+/**
+ * GET /api/reports/floor-status?floor=1
+ * Returns floor-specific status and completion percentage
+ */
+reportsRouter.get('/floor-status', requireRoles('admin', 'manager', 'receptionist'), async (req: Request, res: Response) => {
+  try {
+    const floorParam = req.query.floor as string;
+
+    if (!floorParam) {
+      return res.status(400).json({ error: 'Floor parameter is required' });
+    }
+
+    const floor = parseInt(floorParam, 10);
+    if (isNaN(floor)) {
+      return res.status(400).json({ error: 'Invalid floor number' });
+    }
+
+    const rooms = await Room.find({ floor }).lean();
+    const totalRooms = rooms.length;
+
+    if (totalRooms === 0) {
+      return res.json({
+        floor,
+        totalRooms: 0,
+        percentage: 0,
+        status: [
+          { name: 'Completed', color: 'text-blue-500', done: true },
+          { name: 'Yet to Complete', color: 'text-gray-400', done: false },
+        ],
+      });
+    }
+
+    const cleaningCount = rooms.filter((r) => (r.status as any) === 'Cleaning' || r.status === 'Needs Cleaning').length;
+    const maintenanceCount = rooms.filter((r) => r.status === 'Maintenance').length;
+
+    const floorCompletion = Math.round(((totalRooms - cleaningCount - maintenanceCount) / totalRooms) * 100);
+
+    res.json({
+      floor,
+      totalRooms,
+      percentage: floorCompletion,
+      status: [
+        { name: 'Completed', color: 'text-blue-500', done: true },
+        { name: 'Yet to Complete', color: 'text-gray-400', done: false },
+      ],
+    });
+
+  } catch (err) {
+    console.error("Floor Status Error:", err);
+    res.status(500).json({ error: 'Failed to get floor status' });
   }
 });
 

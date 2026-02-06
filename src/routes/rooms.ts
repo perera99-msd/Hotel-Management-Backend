@@ -62,8 +62,8 @@ roomsRouter.get('/', async (req: Request, res: Response) => {
             // If a confirmed booking exists for today, show Reserved
             computedStatus = 'Reserved' as RoomStatus;
           } else if (room.status === 'Reserved') {
-            // No confirmed booking anymore (cancelled), revert to Available
-            computedStatus = 'Available' as RoomStatus;
+            // Keep manually set Reserved status
+            computedStatus = 'Reserved' as RoomStatus;
           } else if (room.status === 'Needs Cleaning') {
             // Keep as Needs Cleaning
             computedStatus = 'Needs Cleaning' as RoomStatus;

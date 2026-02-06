@@ -7,7 +7,7 @@ import { Invoice } from '../models/invoice.js';
 import { Order } from '../models/order.js'; // ✅ FIX: Added missing import
 import { Room } from '../models/room.js';
 import { User } from '../models/user.js';
-import { sendNotification } from '../services/notificationService.js';
+import { notifyBookingCreated, notifyCheckout, sendNotification } from '../services/notificationService.js';
 import { calculateBookingCharges } from '../utils/bookingCalculations.js';
 
 export const bookingsRouter = Router();
@@ -23,7 +23,7 @@ bookingsRouter.get('/', async (req: Request, res: Response) => {
 
     const bookings = await Booking.find(filter)
       .populate('roomId')
-      .populate('guestId', 'name email phone')
+      .populate('guestId', 'name email phone idNumber')
       .populate('appliedDealId', 'dealName discount') // Include deal info
       .sort({ createdAt: -1 })
       .lean();
@@ -309,52 +309,32 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
     try {
       const guest = await User.findById(guestId);
       const room = await Room.findById(roomId).lean();
-      const roomLabel = room?.roomNumber ? `Room ${room.roomNumber}` : 'your room';
 
-      if (guest) {
-        const dateRange = `${start.toLocaleDateString()} to ${end.toLocaleDateString()}`;
-        const customerMessage = `Hi ${guest.name || 'guest'}, your booking is ${finalStatus === 'CheckedIn' ? 'checked in' : 'confirmed'}.\nRoom: ${roomLabel}.\nStay: ${dateRange}.`;
-        const staffMessage = `New booking ${finalStatus === 'CheckedIn' ? 'checked in' : 'confirmed'} for ${guest.name || 'guest'}.\nRoom: ${roomLabel}.\nStay: ${dateRange}.`;
-
-        console.log("🚀 [Notification] Starting sending process...");
-
-        // Customer notification (email + SMS + dashboard)
-        await sendNotification({
-          type: 'BOOKING',
-          title: finalStatus === 'CheckedIn' ? 'Check-in confirmed' : 'Booking confirmed',
-          message: customerMessage,
-          recipientEmail: guest.email,
-          recipientPhone: guest.phone,
-          targetRoles: ['customer'],
-          targetUserId: (guest as any)._id.toString(),
-          userId: (guest as any)._id.toString(),
-          notifyAdmin: false,
-          data: {
-            bookingId: (newBooking as any)._id.toString(),
-            roomId: roomId.toString(),
-            guestName: guest.name,
-            status: finalStatus
-          }
+      if (guest && room) {
+        // Use the new specialized notification function
+        await notifyBookingCreated({
+          bookingId: (newBooking as any)._id.toString(),
+          guestId: (guest as any)._id.toString(),
+          guestName: guest.name,
+          guestEmail: guest.email,
+          guestPhone: guest.phone,
+          roomId: roomId.toString(),
+          roomNumber: room.roomNumber,
+          roomType: room.type,
+          checkInDate: start,
+          checkOutDate: end,
+          nights: Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)),
+          adults,
+          children,
+          totalPrice: (newBooking as any).roomTotal,
+          appliedDiscount: (newBooking as any).appliedDiscount,
         });
 
-        // Staff notification (dashboard only)
-        await sendNotification({
-          type: 'BOOKING',
-          title: `Booking ${finalStatus === 'CheckedIn' ? 'checked in' : 'confirmed'}`,
-          message: staffMessage,
-          targetRoles: ['admin', 'receptionist', 'manager'],
-          data: {
-            bookingId: (newBooking as any)._id.toString(),
-            roomId: roomId.toString(),
-            guestName: guest.name,
-            status: finalStatus
-          }
-        });
-
-        console.log("✅ [Notification] Process Completed");
+        console.log("✅ [Booking Notification] Process Completed");
       }
     } catch (notifErr: any) {
-      console.error("❌ [Notification Failed]", notifErr.message);
+      console.error("❌ [Booking Notification Failed]", notifErr.message);
+      // Don't let notification errors block the response
     }
 
     res.status(201).json(newBooking);
@@ -671,43 +651,32 @@ bookingsRouter.post('/:id/checkout', requireRoles('admin', 'receptionist'), asyn
       try {
         const guest = await User.findById(booking.guestId);
         const room = await Room.findById(booking.roomId).lean();
-        const roomLabel = room?.roomNumber ? `Room ${room.roomNumber}` : 'your room';
+        const invoice = await Invoice.findOne({ bookingId: booking._id }).lean();
 
-        if (guest) {
-          const customerMessage = `Thank you for staying with us! ${roomLabel} has been checked out. We hope you enjoyed your stay at Grand Hotel.`;
-          const staffMessage = `Guest ${guest.name || 'customer'} checked out from ${roomLabel}.`;
+        if (guest && room) {
+          const checkInDate = booking.checkIn;
+          const checkOutDate = booking.checkOut;
+          const nights = Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
 
-          // Customer notification (email + SMS + dashboard)
-          await sendNotification({
-            type: 'BOOKING',
-            title: 'Check-out Complete',
-            message: customerMessage,
-            recipientEmail: guest.email,
-            recipientPhone: guest.phone,
-            targetRoles: ['customer'],
-            targetUserId: (guest as any)._id.toString(),
-            userId: (guest as any)._id.toString(),
-            notifyAdmin: false,
-            data: {
-              bookingId: (booking as any)._id.toString(),
-              roomId: booking.roomId.toString(),
-              guestName: guest.name,
-              status: 'CheckedOut'
-            }
-          });
+          // Calculate totals
+          const totalPrice = (booking as any).roomTotal || 0;
+          const appliedDiscount = (booking as any).appliedDiscount || 0;
+          const finalAmount = invoice ? invoice.total : (totalPrice - appliedDiscount);
+          const taxes = invoice ? invoice.tax : 0;
 
-          // Staff notification (dashboard only)
-          await sendNotification({
-            type: 'BOOKING',
-            title: 'Guest Checked Out',
-            message: staffMessage,
-            targetRoles: ['admin', 'receptionist', 'manager'],
-            data: {
-              bookingId: (booking as any)._id.toString(),
-              roomId: booking.roomId.toString(),
-              guestName: guest.name,
-              status: 'CheckedOut'
-            }
+          // Use specialized checkout notification
+          await notifyCheckout({
+            guestId: (guest as any)._id.toString(),
+            guestName: guest.name,
+            guestEmail: guest.email,
+            roomNumber: room.roomNumber,
+            checkInDate,
+            checkOutDate,
+            nights,
+            totalPrice,
+            appliedDiscount,
+            taxes,
+            finalAmount,
           });
         }
       } catch (notifErr: any) {
