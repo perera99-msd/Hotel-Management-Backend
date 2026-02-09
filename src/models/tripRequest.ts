@@ -1,4 +1,4 @@
-import mongoose, { Schema, Document, Model, Types } from 'mongoose';
+import mongoose, { Document, Model, Schema, Types } from 'mongoose';
 
 export type TripRequestStatus = 'Requested' | 'Pending' | 'Confirmed' | 'Completed' | 'Cancelled' | 'Reviewed' | 'Approved' | 'Rejected';
 
@@ -11,6 +11,9 @@ export interface ITripRequest extends Document {
   tripDate?: Date;
   participants: number;
   totalPrice?: number;
+  appliedDealId?: Types.ObjectId;
+  appliedDiscount?: number;
+  dealDiscountAmount?: number;
   details: string;            // Notes or Custom Details
   status: TripRequestStatus;
   responseNotes?: string;
@@ -26,12 +29,15 @@ const TripRequestSchema = new Schema<ITripRequest>(
     tripDate: { type: Date },
     participants: { type: Number, default: 1 },
     totalPrice: { type: Number },
+    appliedDealId: { type: Schema.Types.ObjectId, ref: 'Deal' },
+    appliedDiscount: { type: Number },
+    dealDiscountAmount: { type: Number },
     details: { type: String, default: '' },
-    status: { 
-      type: String, 
-      enum: ['Requested', 'Pending', 'Confirmed', 'Completed', 'Cancelled', 'Reviewed', 'Approved', 'Rejected'], 
-      default: 'Pending', 
-      index: true 
+    status: {
+      type: String,
+      enum: ['Requested', 'Pending', 'Confirmed', 'Completed', 'Cancelled', 'Reviewed', 'Approved', 'Rejected'],
+      default: 'Pending',
+      index: true
     },
     responseNotes: { type: String },
   },

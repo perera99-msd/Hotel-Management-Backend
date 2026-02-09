@@ -1,5 +1,5 @@
 // src/models/order.ts
-import mongoose, { Schema, Document, Model, Types } from 'mongoose';
+import mongoose, { Document, Model, Schema, Types } from 'mongoose';
 
 export type OrderStatus = 'Preparing' | 'Ready' | 'Served' | 'Cancelled';
 
@@ -19,6 +19,14 @@ export interface IOrder extends Document {
   specialNotes?: string;
   items: IOrderItem[];
   totalAmount: number;
+  dealDiscount?: number;
+  appliedDeals?: {
+    dealId: Types.ObjectId;
+    dealName?: string;
+    discountType?: 'percentage' | 'bogo';
+    discount?: number;
+    savings?: number;
+  }[];
   status: OrderStatus;
   placedBy: Types.ObjectId;
 }
@@ -40,6 +48,19 @@ const OrderSchema = new Schema<IOrder>(
     specialNotes: { type: String },
     items: { type: [OrderItemSchema], required: true },
     totalAmount: { type: Number, required: true },
+    dealDiscount: { type: Number, default: 0 },
+    appliedDeals: {
+      type: [
+        {
+          dealId: { type: Schema.Types.ObjectId, ref: 'Deal', required: true },
+          dealName: { type: String },
+          discountType: { type: String, enum: ['percentage', 'bogo'] },
+          discount: { type: Number },
+          savings: { type: Number }
+        }
+      ],
+      default: []
+    },
     status: { type: String, enum: ['Preparing', 'Ready', 'Served', 'Cancelled'], default: 'Preparing', index: true },
     placedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   },
