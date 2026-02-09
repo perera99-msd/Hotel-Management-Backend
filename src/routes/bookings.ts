@@ -61,9 +61,14 @@ bookingsRouter.post('/calculate-charges', requireRoles('admin', 'receptionist', 
     const allowedDealStatuses = ['Ongoing', 'New', 'Inactive', 'Full'];
     const potentialDeals = await Deal.find({
       status: { $in: allowedDealStatuses },
-      $or: [
-        { roomIds: { $in: [roomId] } },
-        { roomType: new RegExp(`^${(room as any).type}$`, 'i') }
+      $and: [
+        { $or: [{ dealType: 'room' }, { dealType: { $exists: false } }] },
+        {
+          $or: [
+            { roomIds: { $in: [roomId] } },
+            { roomType: new RegExp(`^${(room as any).type}$`, 'i') }
+          ]
+        }
       ]
     }).lean();
 
@@ -207,9 +212,14 @@ bookingsRouter.post('/', requireRoles('admin', 'receptionist', 'customer'), asyn
     const allowedDealStatuses = ['Ongoing', 'New', 'Inactive', 'Full'];
     const potentialDeals = await Deal.find({
       status: { $in: ['Ongoing', 'New', 'Inactive', 'Full'] },
-      $or: [
-        { roomIds: { $in: [roomId] } },
-        { roomType: new RegExp(`^${(room as any).type}$`, 'i') }
+      $and: [
+        { $or: [{ dealType: 'room' }, { dealType: { $exists: false } }] },
+        {
+          $or: [
+            { roomIds: { $in: [roomId] } },
+            { roomType: new RegExp(`^${(room as any).type}$`, 'i') }
+          ]
+        }
       ]
     }).lean();
 

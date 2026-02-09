@@ -1,9 +1,11 @@
 import { Request, Response, Router } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
+import { Deal } from '../models/deal.js';
 import { IInvoiceLineItem, Invoice } from '../models/invoice.js';
 import { Order } from '../models/order.js';
 import { Revenue } from '../models/revenue.js';
+import { TripPackage } from '../models/tripPackage.js';
 import { TripRequest } from '../models/tripRequest.js';
 import { notifyBillPaid } from '../services/notificationService.js';
 
@@ -106,11 +108,93 @@ async function buildAutoLineItems(bookingId: string): Promise<IInvoiceLineItem[]
   }
 
   const orders = await Order.find({ bookingId, status: { $ne: 'Cancelled' } }).lean();
-  orders.forEach((o) => {
+  const menuItemIds = orders.flatMap((o: any) => (o.items || []).map((it: any) => it.menuItemId?.toString())).filter(Boolean);
+  const orderDeals = await Deal.find({
+    status: { $in: ['Ongoing', 'New', 'Inactive', 'Full'] },
+    dealType: 'food',
+    menuItemIds: { $in: menuItemIds }
+  }).lean();
+
+  const isDealActiveForDate = (deal: any, targetDate: Date) => {
+    const startDate = new Date(deal.startDate);
+    const endDate = new Date(deal.endDate);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return false;
+    return startDate <= targetDate && endDate >= targetDate;
+  };
+
+  const computeOrderDealSavings = (orderItems: any[], deals: any[]) => {
+    const dealSavingsMap = new Map<string, { dealName?: string; savings: number }>();
+    let totalSavings = 0;
+
+    orderItems.forEach((item) => {
+      const matchingDeals = deals.filter((d) =>
+        Array.isArray(d.menuItemIds) && d.menuItemIds.some((id: any) => id.toString() === item.menuItemId?.toString())
+      );
+
+      if (matchingDeals.length === 0) return;
+
+      let bestDeal: any = null;
+      let bestSavings = 0;
+
+      matchingDeals.forEach((deal) => {
+        let savings = 0;
+        if ((deal.discountType || 'percentage') === 'bogo') {
+          const freeItems = Math.floor((item.quantity || 0) / 2);
+          savings = freeItems * (item.price || 0);
+        } else {
+          const discount = Number(deal.discount || 0);
+          savings = (item.price || 0) * (item.quantity || 0) * (discount / 100);
+        }
+
+        if (savings > bestSavings) {
+          bestSavings = savings;
+          bestDeal = deal;
+        }
+      });
+
+      if (bestDeal && bestSavings > 0) {
+        const dealId = bestDeal._id.toString();
+        const existing = dealSavingsMap.get(dealId);
+        if (existing) {
+          existing.savings += bestSavings;
+        } else {
+          dealSavingsMap.set(dealId, {
+            dealName: bestDeal.dealName,
+            savings: bestSavings
+          });
+        }
+        totalSavings += bestSavings;
+      }
+    });
+
+    return { totalSavings, appliedDeals: Array.from(dealSavingsMap.values()) };
+  };
+
+  orders.forEach((o: any) => {
+    const baseTotal = (o.items || []).reduce((sum: number, it: any) => sum + (it.price || 0) * (it.quantity || 0), 0);
+    const orderDate = o.createdAt ? new Date(o.createdAt) : new Date();
+
+    let totalAmount = o.totalAmount || baseTotal;
+    let dealNote = '';
+
+    if (o.dealDiscount && o.dealDiscount > 0 && Array.isArray(o.appliedDeals) && o.appliedDeals.length > 0) {
+      totalAmount = Math.max(0, baseTotal - o.dealDiscount);
+      dealNote = ` (Deal: ${o.appliedDeals.map((d: any) => d.dealName || 'Deal').join(', ')})`;
+    } else {
+      const activeDeals = orderDeals.filter((deal) => isDealActiveForDate(deal, orderDate));
+      const { totalSavings, appliedDeals } = computeOrderDealSavings(o.items || [], activeDeals);
+      if (totalSavings > 0) {
+        totalAmount = Math.max(0, baseTotal - totalSavings);
+        dealNote = ` (Deal: ${appliedDeals.map((d: any) => d.dealName || 'Deal').join(', ')})`;
+      } else {
+        totalAmount = baseTotal;
+      }
+    }
+
     items.push({
-      description: `Order ${o._id.toString().slice(-6)}`,
+      description: `Order ${o._id.toString().slice(-6)}${dealNote}`,
       qty: 1,
-      amount: o.totalAmount,
+      amount: totalAmount,
       category: 'meal',
       source: 'order',
       refId: o._id as any,
@@ -119,11 +203,56 @@ async function buildAutoLineItems(bookingId: string): Promise<IInvoiceLineItem[]
   });
 
   const trips = await TripRequest.find({ bookingId, status: { $nin: ['Cancelled', 'Rejected'] } }).lean();
-  trips.forEach((t) => {
+  const tripPackageIds = trips.map((t: any) => t.packageId).filter(Boolean);
+  const tripPackages = await TripPackage.find({ _id: { $in: tripPackageIds } }).lean();
+  const tripPackagesById = new Map(tripPackages.map((p: any) => [p._id.toString(), p]));
+
+  const tripDeals = await Deal.find({
+    status: { $in: ['Ongoing', 'New', 'Inactive', 'Full'] },
+    dealType: 'trip',
+    tripPackageIds: { $in: tripPackageIds }
+  }).lean();
+
+  trips.forEach((t: any) => {
+    const tripDate = t.tripDate ? new Date(t.tripDate) : new Date(t.createdAt || Date.now());
+    let basePrice = t.totalPrice || 0;
+    let dealNote = '';
+
+    if (t.packageId) {
+      const pkg = tripPackagesById.get(t.packageId.toString());
+      if (pkg?.price) {
+        basePrice = pkg.price * (t.participants || 1);
+      }
+    }
+
+    let finalAmount = t.totalPrice || basePrice;
+
+    if (t.appliedDiscount && t.appliedDiscount > 0 && t.dealDiscountAmount !== undefined) {
+      finalAmount = Math.max(0, basePrice - t.dealDiscountAmount);
+      dealNote = ` (Deal: ${t.appliedDiscount}% off)`;
+    } else if (t.packageId) {
+      const activeTripDeals = tripDeals.filter((deal) =>
+        Array.isArray(deal.tripPackageIds) && deal.tripPackageIds.some((id: any) => id.toString() === t.packageId.toString()) && isDealActiveForDate(deal, tripDate)
+      );
+
+      if (activeTripDeals.length > 0) {
+        const bestDeal = activeTripDeals.reduce((best, deal) => {
+          if (!best || (deal.discount || 0) > (best.discount || 0)) return deal;
+          return best;
+        }, null as any);
+
+        const discount = Number(bestDeal?.discount || 0);
+        if (discount > 0) {
+          finalAmount = Math.max(0, basePrice - basePrice * (discount / 100));
+          dealNote = ` (Deal: ${discount}% off)`;
+        }
+      }
+    }
+
     items.push({
-      description: `Trip: ${t.packageName || t.location || t._id.toString().slice(-6)}`,
+      description: `Trip: ${t.packageName || t.location || t._id.toString().slice(-6)}${dealNote}`,
       qty: 1,
-      amount: t.totalPrice || 0,
+      amount: finalAmount,
       category: 'service',
       source: 'trip',
       refId: t._id as any,

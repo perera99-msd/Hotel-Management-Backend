@@ -2,6 +2,7 @@ import dayjs from 'dayjs';
 import { Request, Response, Router } from 'express';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
+import { Deal } from '../models/deal.js';
 import { Invoice } from '../models/invoice.js';
 import { TripPackage } from '../models/tripPackage.js';
 import { TripRequest } from '../models/tripRequest.js';
@@ -10,6 +11,27 @@ import { notifyTripRequestConfirmed, notifyTripRequestCreated, sendNotification 
 
 export const tripsRouter = Router();
 tripsRouter.use(authenticate());
+
+const resolveTripDeal = async (packageId: string, targetDate: Date) => {
+  const deals = await Deal.find({
+    status: { $in: ['Ongoing', 'New', 'Inactive', 'Full'] },
+    dealType: 'trip',
+    tripPackageIds: { $in: [packageId] }
+  }).lean();
+
+  const activeDeals = deals.filter((deal) => {
+    const startDate = new Date(deal.startDate);
+    const endDate = new Date(deal.endDate);
+    return !isNaN(startDate.getTime()) && !isNaN(endDate.getTime()) && startDate <= targetDate && endDate >= targetDate;
+  });
+
+  if (activeDeals.length === 0) return null;
+
+  return activeDeals.reduce((best, deal) => {
+    if (!best || (deal.discount || 0) > (best.discount || 0)) return deal;
+    return best;
+  }, null as any);
+};
 
 // --- PACKAGES ---
 
@@ -114,15 +136,25 @@ tripsRouter.post('/requests/admin', requireRoles('admin', 'receptionist'), async
     if (!pkg) return res.status(404).json({ error: 'Package not found' });
 
     // 2. Create Request
+    const basePrice = price || (pkg.price * participants);
+    const tripDateValue = tripDate ? new Date(tripDate) : new Date();
+    const appliedDeal = await resolveTripDeal(pkg._id.toString(), tripDateValue);
+    const discountPercent = appliedDeal ? Number(appliedDeal.discount || 0) : 0;
+    const discountAmount = basePrice * (discountPercent / 100);
+    const discountedTotal = Math.max(0, basePrice - discountAmount);
+
     const newBooking = await TripRequest.create({
       requestedBy: guestId,
       bookingId,
       packageId: pkg._id,
       packageName: pkg.name,
       location: pkg.location,
-      tripDate: tripDate,
+      tripDate: tripDateValue,
       participants: participants,
-      totalPrice: price || (pkg.price * participants),
+      totalPrice: discountedTotal,
+      appliedDealId: appliedDeal?._id,
+      appliedDiscount: discountPercent,
+      dealDiscountAmount: discountAmount,
       status: status || 'Confirmed',
       details: notes || 'Manual Booking by Admin'
     });
@@ -190,11 +222,21 @@ tripsRouter.post('/requests', requireRoles('customer'), async (req: Request, res
       const pkg = await TripPackage.findById(packageId);
       if (!pkg) return res.status(404).json({ error: 'Package not found' });
 
+      const basePrice = pkg.price * (participants || 1);
+      const tripDateValue = tripDate ? new Date(tripDate) : new Date();
+      const appliedDeal = await resolveTripDeal(pkg._id.toString(), tripDateValue);
+      const discountPercent = appliedDeal ? Number(appliedDeal.discount || 0) : 0;
+      const discountAmount = basePrice * (discountPercent / 100);
+      const discountedTotal = Math.max(0, basePrice - discountAmount);
+
       bookingData.packageId = pkg._id;
       bookingData.packageName = pkg.name;
       bookingData.location = pkg.location;
-      bookingData.totalPrice = pkg.price * (participants || 1); // Estimated total
-      bookingData.tripDate = tripDate;
+      bookingData.totalPrice = discountedTotal;
+      bookingData.tripDate = tripDateValue;
+      bookingData.appliedDealId = appliedDeal?._id;
+      bookingData.appliedDiscount = discountPercent;
+      bookingData.dealDiscountAmount = discountAmount;
 
       // Append guest contact info to details if provided
       if (guestInfo) {
@@ -276,8 +318,12 @@ tripsRouter.patch('/requests/:id/status', requireRoles('admin', 'receptionist'),
           );
 
           if (!existingTripItem) {
+            const dealNote = request.appliedDiscount && request.appliedDiscount > 0
+              ? ` (Deal: ${request.appliedDiscount}% off)`
+              : '';
+
             invoice.lineItems.push({
-              description: `Trip: ${request.packageName || request.location || (request._id as any).toString().slice(-6)}`,
+              description: `Trip: ${request.packageName || request.location || (request._id as any).toString().slice(-6)}${dealNote}`,
               qty: 1,
               amount: request.totalPrice,
               category: 'service',

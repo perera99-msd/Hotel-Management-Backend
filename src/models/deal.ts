@@ -4,10 +4,14 @@ import mongoose, { Document, Schema, Types } from 'mongoose';
 export interface IDeal extends Document {
   referenceNumber: string;
   dealName: string;
+  dealType: 'room' | 'food' | 'trip';
   startDate: string;
   endDate: string;
-  roomType: string[];
+  discountType?: 'percentage' | 'bogo';
+  roomType?: string[];
   roomIds?: Types.ObjectId[];
+  menuItemIds?: Types.ObjectId[];
+  tripPackageIds?: Types.ObjectId[];
   status: 'Ongoing' | 'Full' | 'Inactive' | 'New' | 'Finished';
   price: number;
   discount: number;
@@ -22,10 +26,14 @@ const DealSchema = new Schema<IDeal>(
   {
     referenceNumber: { type: String, required: true, unique: true },
     dealName: { type: String, required: true },
+    dealType: { type: String, enum: ['room', 'food', 'trip'], default: 'room', index: true },
     startDate: { type: String, required: true },
     endDate: { type: String, required: true },
-    roomType: { type: [String], required: true },
-    roomIds: { type: [Schema.Types.ObjectId], ref: 'Room', required: true }, // Required: deals must target specific rooms
+    discountType: { type: String, enum: ['percentage', 'bogo'], default: 'percentage' },
+    roomType: { type: [String] },
+    roomIds: { type: [Schema.Types.ObjectId], ref: 'Room' },
+    menuItemIds: { type: [Schema.Types.ObjectId], ref: 'MenuItem' },
+    tripPackageIds: { type: [Schema.Types.ObjectId], ref: 'TripPackage' },
     status: {
       type: String,
       enum: ['Ongoing', 'Full', 'Inactive', 'New', 'Finished'],

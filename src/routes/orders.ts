@@ -2,6 +2,7 @@ import { Request, Response, Router } from 'express';
 import { Types, isValidObjectId } from 'mongoose';
 import { authenticate, requireRoles } from '../middleware/auth.js';
 import { Booking } from '../models/booking.js';
+import { Deal } from '../models/deal.js';
 import { Invoice } from '../models/invoice.js';
 import { MenuItem } from '../models/menuItem.js';
 import { IOrderItem, Order } from '../models/order.js';
@@ -10,6 +11,63 @@ import { notifyOrderCreated, notifyOrderReady } from '../services/notificationSe
 
 export const ordersRouter = Router();
 ordersRouter.use(authenticate());
+
+const isDealActiveForDate = (deal: any, targetDate: Date) => {
+  const startDate = new Date(deal.startDate);
+  const endDate = new Date(deal.endDate);
+  return !isNaN(startDate.getTime()) && !isNaN(endDate.getTime()) && startDate <= targetDate && endDate >= targetDate;
+};
+
+const computeOrderDealSavings = (items: IOrderItem[], deals: any[]) => {
+  const dealSavingsMap = new Map<string, { dealId: any; dealName?: string; discountType?: 'percentage' | 'bogo'; discount?: number; savings: number }>();
+  let totalSavings = 0;
+
+  items.forEach((item) => {
+    const matchingDeals = deals.filter((d) =>
+      Array.isArray(d.menuItemIds) && d.menuItemIds.some((id: any) => id.toString() === item.menuItemId.toString())
+    );
+
+    if (matchingDeals.length === 0) return;
+
+    let bestDeal: any = null;
+    let bestSavings = 0;
+
+    matchingDeals.forEach((deal) => {
+      let savings = 0;
+      if ((deal.discountType || 'percentage') === 'bogo') {
+        const freeItems = Math.floor(item.quantity / 2);
+        savings = freeItems * item.price;
+      } else {
+        const discount = Number(deal.discount || 0);
+        savings = item.price * item.quantity * (discount / 100);
+      }
+
+      if (savings > bestSavings) {
+        bestSavings = savings;
+        bestDeal = deal;
+      }
+    });
+
+    if (bestDeal && bestSavings > 0) {
+      const dealId = bestDeal._id.toString();
+      const existing = dealSavingsMap.get(dealId);
+      if (existing) {
+        existing.savings += bestSavings;
+      } else {
+        dealSavingsMap.set(dealId, {
+          dealId: bestDeal._id,
+          dealName: bestDeal.dealName,
+          discountType: bestDeal.discountType || 'percentage',
+          discount: bestDeal.discount || 0,
+          savings: bestSavings
+        });
+      }
+      totalSavings += bestSavings;
+    }
+  });
+
+  return { totalSavings, appliedDeals: Array.from(dealSavingsMap.values()) };
+};
 
 // GET /api/orders
 ordersRouter.get('/', requireRoles('admin', 'receptionist', 'kitchen', 'customer'), async (req: Request, res: Response) => {
@@ -124,7 +182,19 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
       }
     }
 
-    const totalAmount = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+    const baseTotal = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+
+    // Apply food deals (percentage or BOGO)
+    const menuItemIds = orderItems.map((it) => it.menuItemId.toString());
+    const activeDeals = await Deal.find({
+      status: { $in: ['Ongoing', 'New', 'Inactive', 'Full'] },
+      dealType: 'food',
+      menuItemIds: { $in: menuItemIds }
+    }).lean();
+
+    const applicableDeals = activeDeals.filter((deal) => isDealActiveForDate(deal, new Date()));
+    const { totalSavings, appliedDeals } = computeOrderDealSavings(orderItems, applicableDeals);
+    const totalAmount = Math.max(0, baseTotal - totalSavings);
     let guestId = booking.guestId as any;
     let finalGuestName = (booking.guestId as any)?.name || guestName || user.name || 'Guest';
 
@@ -152,6 +222,8 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
       specialNotes,
       items: orderItems,
       totalAmount,
+      dealDiscount: totalSavings,
+      appliedDeals,
       placedBy: user.mongoId,
     });
 
@@ -179,8 +251,12 @@ ordersRouter.post('/', requireRoles('customer', 'receptionist', 'admin'), async 
     try {
       const invoice = await Invoice.findOne({ bookingId, status: { $ne: 'paid' } });
       if (invoice) {
+        const dealNote = totalSavings > 0 && appliedDeals.length > 0
+          ? ` (Deal: ${appliedDeals.map((d) => d.dealName || 'Deal').join(', ')})`
+          : '';
+
         invoice.lineItems.push({
-          description: `Order ${(order._id as any).toString().slice(-6)}`,
+          description: `Order ${(order._id as any).toString().slice(-6)}${dealNote}`,
           qty: 1,
           amount: totalAmount,
           category: 'meal',
