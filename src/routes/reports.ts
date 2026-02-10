@@ -130,8 +130,9 @@ reportsRouter.get('/dashboard', requireRoles('admin', 'manager', 'receptionist')
       if (r.status === 'Occupied') entry.current += 1;
     });
 
-    deals.forEach((d) => {
-      d.roomType.forEach((rtype: string) => {
+    deals.forEach((d: any) => {
+      const roomTypes = Array.isArray(d.roomType) ? d.roomType : [];
+      roomTypes.forEach((rtype: string) => {
         for (const [key, val] of roomTypesMap) {
           if (key.toLowerCase().includes(rtype.toLowerCase()) || rtype.toLowerCase().includes(key.toLowerCase())) {
             val.deals += 1;

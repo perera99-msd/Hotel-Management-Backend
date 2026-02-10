@@ -138,7 +138,7 @@ tripsRouter.post('/requests/admin', requireRoles('admin', 'receptionist'), async
     // 2. Create Request
     const basePrice = price || (pkg.price * participants);
     const tripDateValue = tripDate ? new Date(tripDate) : new Date();
-    const appliedDeal = await resolveTripDeal(pkg._id.toString(), tripDateValue);
+    const appliedDeal = await resolveTripDeal((pkg as any)._id.toString(), tripDateValue);
     const discountPercent = appliedDeal ? Number(appliedDeal.discount || 0) : 0;
     const discountAmount = basePrice * (discountPercent / 100);
     const discountedTotal = Math.max(0, basePrice - discountAmount);
@@ -224,7 +224,7 @@ tripsRouter.post('/requests', requireRoles('customer'), async (req: Request, res
 
       const basePrice = pkg.price * (participants || 1);
       const tripDateValue = tripDate ? new Date(tripDate) : new Date();
-      const appliedDeal = await resolveTripDeal(pkg._id.toString(), tripDateValue);
+      const appliedDeal = await resolveTripDeal((pkg as any)._id.toString(), tripDateValue);
       const discountPercent = appliedDeal ? Number(appliedDeal.discount || 0) : 0;
       const discountAmount = basePrice * (discountPercent / 100);
       const discountedTotal = Math.max(0, basePrice - discountAmount);
