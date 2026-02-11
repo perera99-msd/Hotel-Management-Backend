@@ -160,11 +160,14 @@ userRouter.post('/guest', requireRoles('admin', 'receptionist', 'manager'), asyn
     // Create in Firebase Auth
     let firebaseUser;
     try {
+      // Validate phone format (E.164) or omit if invalid/empty
+      const validPhone = phone && /^\+\d{10,15}$/.test(phone.trim()) ? phone.trim() : undefined;
+
       firebaseUser = await admin.auth().createUser({
         email: targetEmail,
         password,
         displayName: name,
-        phoneNumber: phone || undefined
+        phoneNumber: validPhone
       });
     } catch (firebaseError: any) {
       // If user already exists in Firebase, try to get them
@@ -221,11 +224,14 @@ userRouter.post('/create', requireRoles('admin'), async (req: Request, res: Resp
     // 1. Create in Firebase
     let firebaseUser;
     try {
+      // Validate phone format (E.164) or omit if invalid/empty
+      const validPhone = phone && /^\+\d{10,15}$/.test(phone.trim()) ? phone.trim() : undefined;
+
       firebaseUser = await admin.auth().createUser({
         email,
         password,
         displayName: name,
-        phoneNumber: phone || undefined
+        phoneNumber: validPhone
       });
     } catch (firebaseError: any) {
       // If user already exists in Firebase, try to find them
