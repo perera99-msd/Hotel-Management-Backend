@@ -31,6 +31,16 @@ app.use(morgan('dev'));
 // This makes the 'public' folder accessible at the root URL
 app.use(express.static(path.join(process.cwd(), 'public')));
 
+// ✅ FIX 3: Add Health Check Endpoint (Render deployment fix)
+// This endpoint responds immediately without waiting for MongoDB
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
 // Register all API routes (including the new Deals route)
 registerRoutes(app);
 
@@ -40,16 +50,24 @@ app.use('/docs', swaggerUi.serve, swaggerUi.setup(spec));
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 
+// ✅ FIX 4: Start server immediately to pass Render health checks
+// Don't wait for MongoDB connection before starting the server
+app.listen(port, () => {
+  logger.info(`Server listening on port ${port}`);
+  logger.info(`Static files being served from: ${path.join(process.cwd(), 'public')}`);
+  logger.info('Health check available at /health');
+});
+
+// ✅ FIX 5: Connect to MongoDB asynchronously (don't block server startup)
+// This prevents deployment timeouts if MongoDB is slow or unavailable
 connectMongo()
   .then(() => {
-    app.listen(port, () => {
-      logger.info(`Server listening on port ${port}`);
-      logger.info(`Static files being served from: ${path.join(process.cwd(), 'public')}`);
-    });
+    logger.info('MongoDB connected successfully');
   })
   .catch((err) => {
-    logger.error({ err }, 'Failed to start server');
-    process.exit(1);
+    logger.error({ err }, 'Failed to connect to MongoDB - some features may not work');
+    // Don't exit - let the server keep running
+    // You may want to retry the connection or handle this differently
   });
 
 export default app;
